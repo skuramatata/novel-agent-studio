@@ -156,7 +156,9 @@ export function Reader() {
                 <BookOpen size={40} />
                 <h2>这里将收录你的故事</h2>
                 <p>先在创作对话中生成并采纳章节计划。</p>
-                <small>阅读页保留专注，不提供正文编辑。</small>
+                <small>
+                  这里显示已采纳的正文；草稿可在上方工作区修改、对比后采纳。
+                </small>
               </div>
             )}
           </article>

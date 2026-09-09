@@ -13,6 +13,7 @@ import {
 } from "../runtime/paragraph-review.mjs";
 import { retryReview, reviewWorkflow } from "../runtime/review-workflow.mjs";
 import { digest } from "../runtime/memory.mjs";
+import { authorIntervenes } from "../runtime/revision-session.mjs";
 
 const rows = Array.from(
   { length: 15 },
@@ -201,7 +202,7 @@ test("核对计划逐项覆盖问题，不能遗漏、重复、或悄悄授权�
   assert.throws(() => validateRepairPlan(bad, problems, doc), /历史/);
 });
 
-test("恢复旧版错误审稿缓存先核对实际范围，旧提交不消耗本次预算", async () => {
+test("作者继续旧版错误审稿缓存先核对实际范围，旧提交不消耗新回合预算", async () => {
   const original = [
     {
       scene: 5,
@@ -264,7 +265,8 @@ test("恢复旧版错误审稿缓存先核对实际范围，旧提交不消耗�
     phase: "patch",
     detail: "补丁超出问题指定段落；需要扩大范围时先列出新问题和依据。",
   };
-  retryReview(state);
+  authorIntervenes(state, "author-continue", "继续修订");
+  retryReview(state, true);
   assert.equal(state.reviewWorkflow.phase, "grounding");
   const calls = [];
   const result = await reviewAndPatch({

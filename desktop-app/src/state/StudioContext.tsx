@@ -116,6 +116,12 @@ function useStudioState() {
       setProgress("准备作者档案与作品上下文");
       const result = await bridge.generate({
         ...options,
+        ...((options.resume || options.decision) && !options.authorAction
+          ? {
+              authorInterventionId:
+                options.authorInterventionId || crypto.randomUUID(),
+            }
+          : {}),
         projectId: id!,
         instruction,
         provider,

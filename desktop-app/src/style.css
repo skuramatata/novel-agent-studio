@@ -2060,3 +2060,102 @@ select:focus {
   max-height: 88vh;
   overflow-y: auto;
 }
+/* 对话与章节阅读共用的草稿工作区。 */
+.draft-workspace {
+  margin: 20px 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-width: 0;
+}
+.draft-workspace-heading,
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.draft-workspace-heading {
+  justify-content: space-between;
+}
+.draft-workspace details {
+  margin: 12px 0;
+}
+.draft-workspace summary {
+  cursor: pointer;
+  padding: 8px 0;
+}
+.draft-workspace textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 10px 0;
+}
+.draft-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 12px 0;
+}
+.draft-scope select,
+.draft-history select {
+  max-width: 100%;
+}
+.draft-text {
+  max-height: 460px;
+  overflow: auto;
+}
+.draft-text p {
+  white-space: pre-wrap;
+  line-height: 1.85;
+}
+.draft-issue-list {
+  max-height: 300px;
+  overflow: auto;
+}
+.draft-issue-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.draft-issue-list input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin-top: 4px;
+}
+.draft-issue-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.draft-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 12px;
+}
+.draft-comparison pre {
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 400px;
+  overflow: auto;
+  line-height: 1.8;
+}
+.draft-editor {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+@media (max-width: 800px) {
+  .draft-comparison {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .draft-workspace {
+    padding: 12px;
+  }
+}

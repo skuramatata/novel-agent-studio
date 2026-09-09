@@ -141,6 +141,7 @@ export interface PendingReview {
   }[];
 }
 export interface ChapterTask {
+  workspace?: DraftWorkspaceState | null;
   reviewProgress?: {
     phase: string;
     label: string;
@@ -165,7 +166,51 @@ export interface ChapterTask {
     reason: string;
   }[];
 }
+export interface DraftScope {
+  kind: "chapter" | "scene" | "paragraph";
+  sourceId?: string;
+  paragraph?: number;
+}
+export interface DraftAction {
+  id: string;
+  taskId: string;
+  draftVersion: string;
+  type:
+    | "continue"
+    | "revise"
+    | "regenerate"
+    | "keep"
+    | "edit"
+    | "restore"
+    | "deliver";
+  scope?: DraftScope;
+  issueIds?: string[];
+  text?: string;
+  versionId?: string;
+}
+export interface DraftWorkspaceState {
+  version: string;
+  canGuide: boolean;
+  budget: { epoch: number; used: number; limit: number };
+  lastInstruction: string;
+  scenes: {
+    scene: number;
+    sourceId: string;
+    content: string;
+    paragraphs: { paragraph: number; text: string }[];
+  }[];
+  versions: {
+    id: string;
+    label: string;
+    status: string;
+    at: string;
+    reason: string;
+    text: string;
+  }[];
+}
 export interface GenerationOptions {
+  authorAction?: DraftAction;
+  authorInterventionId?: string;
   decision?: ReviewDecision;
   chapterId?: string;
   mode?: "memory";
@@ -218,6 +263,8 @@ export interface Bridge {
   saveSettings: (c: ProviderConfig & { apiKey: string }) => Promise<Settings>;
   test: (p: Provider) => Promise<{ text: string; model: string }>;
   generate: (r: {
+    authorAction?: DraftAction;
+    authorInterventionId?: string;
     projectId: string;
     instruction: string;
     provider: Provider;

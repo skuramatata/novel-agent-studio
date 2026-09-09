@@ -7,12 +7,18 @@ const readable = (s: string) =>
     .replace(/sentence\s*(\d+)/gi, "第$1句");
 export function ReviewNotice({ onOpen }: { onOpen: () => void }) {
   const task = useChapterTask();
-  if (task?.status !== "awaiting_input") return null;
+  if (
+    !task ||
+    !["awaiting_input", "awaiting_instruction"].includes(task.status)
+  )
+    return null;
   return (
     <div className="composer-hint">
-      草稿已保存，有情节需要你确认。
+      {task.status === "awaiting_input"
+        ? "草稿已保存，有情节需要你确认。"
+        : "草稿已保存，可以继续交代修改或按范围重新生成。"}
       <button className="text-button" onClick={onOpen}>
-        到创作对话回答
+        打开创作对话
       </button>
     </div>
   );

@@ -35,6 +35,10 @@ import { digest } from "./memory.mjs";
 import { countWords } from "./writing.mjs";
 import { appendCreationEvent } from "./creation-log.mjs";
 import {
+  takeRevisionAttempt,
+  recordDraftVersion,
+} from "./revision-session.mjs";
+import {
   CONTINUITY_REVIEW_RULES,
   mergeContinuityReview,
 } from "./continuity.mjs";
@@ -738,6 +742,8 @@ export async function reviewAndPatch({
   maxRounds = 2,
   prepareContinuity,
   profile,
+  authorScope,
+  reviewOnly = false,
 }) {
   const contextHash = digest([
     REVIEW_VERSION,
@@ -746,7 +752,7 @@ export async function reviewAndPatch({
     Number.isFinite(maxWords) ? maxWords : null,
   ]);
   if (
-    state.paragraphReview &&
+    state.paragraphReview?.contextHash &&
     state.paragraphReview.contextHash !== contextHash
   )
     throw Error("补丁审稿上下文已经变化，不能沿用旧证据。");
@@ -757,6 +763,7 @@ export async function reviewAndPatch({
     round: 0,
     commits: [],
   };
+  session.contextHash ??= contextHash;
   state.paragraphReview = session;
   const workflow = reviewWorkflow(state);
   let current = structuredClone(session.inputScenes);
@@ -777,10 +784,7 @@ export async function reviewAndPatch({
   if (digest(scenes) !== digest(current))
     throw Error("当前草稿与已提交补丁不一致，不能重复应用或跨版本恢复。");
   // 预算约束本次新增修订，历史提交不再次消耗恢复预算。
-  session.reviewLimit = Math.max(
-    session.reviewLimit || 0,
-    session.round + maxRounds,
-  );
+  session.reviewLimit ??= session.round + maxRounds;
   await save();
   for (
     let round = session.round;
@@ -888,6 +892,14 @@ export async function reviewAndPatch({
       await save();
       return { scenes: current, review, commits: session.commits };
     }
+    // 局部修改通过后只读复审；不能借复审之名扩大作者指定的范围。
+    if (reviewOnly || (authorScope && session.commits.length)) {
+      throw new ReviewRetryableError(
+        "review",
+        "scope_limit",
+        "所选范围已完成处理，复审仍有待处理问题。当前草稿已保存，请选择问题或调整修改范围后继续。",
+      );
+    }
     problems =
       cycle.problems ||
       (await step("arbitration", () =>
@@ -908,6 +920,7 @@ export async function reviewAndPatch({
       (issue) => retained.find((i) => i.id === issue.id) || issue,
     );
     problems = problems.filter((i) => !i.authorRetained);
+    if (authorScope) problems = problems.map((i) => ({ ...i, authorScope }));
     cycle.problems = problems;
     await save();
     let rejection = cycle.scopeFeedback || cycle.rejection;
@@ -1023,6 +1036,14 @@ export async function reviewAndPatch({
       });
     let accepted = false;
     for (let attempt = cycle.attempt; attempt < 2; attempt++) {
+      // 一组修改与复核计一轮；分批与网络恢复复用本轮，不额外计数或续杯。
+      await step("patch", async () => {
+        takeRevisionAttempt(
+          state,
+          `${doc.version}:${cycle.scopeExpansions || 0}:${attempt}`,
+        );
+        await save();
+      });
       const patchKey = `${REVIEW_VERSION}:patch:${doc.version}:${digest([problems, authorConstraints(state, doc)])}`;
       if (!cycle.patch) markIssues(state, problems, "repairing");
       let patch;
@@ -1062,6 +1083,18 @@ export async function reviewAndPatch({
               ],
               validate: (value, group) => {
                 value = bindPatchVersion(value, doc);
+                if (
+                  authorScope &&
+                  value.replacements.some(
+                    (r) =>
+                      !authorScope.some(
+                        (t) =>
+                          t.sourceId === r.sourceId &&
+                          t.paragraph === r.paragraph,
+                      ),
+                  )
+                )
+                  throw Error("补丁超出作者指定的修改范围，未写入草稿。");
                 applyParagraphPatch(current, doc, group, value);
                 return patchSchema.parse(value);
               },
@@ -1088,6 +1121,12 @@ export async function reviewAndPatch({
       cycle.patch = patch;
       await save();
       const proposed = applyParagraphPatch(current, doc, problems, patch);
+      recordDraftVersion(
+        state,
+        "模型补丁候选（尚未通过复核）",
+        proposed.scenes,
+        "pending",
+      );
       const wordCount = countWords(
         proposed.scenes.map((s) => s.content).join("\n\n"),
       );
@@ -1097,6 +1136,13 @@ export async function reviewAndPatch({
           wordCount,
         };
         session.rejected = { patch, rejection };
+        recordDraftVersion(
+          state,
+          "补丁未通过字数检查",
+          proposed.scenes,
+          "rejected",
+          rejection.reason,
+        );
         cycle.rejection = rejection;
         cycle.attempt = attempt + 1;
         delete cycle.patch;
@@ -1167,6 +1213,22 @@ export async function reviewAndPatch({
         )
       ) {
         rejection = checked;
+        recordDraftVersion(
+          state,
+          "补丁未通过复核",
+          proposed.scenes,
+          "rejected",
+          checked.checks
+            .filter(
+              (c) =>
+                !c.resolved ||
+                !c.preservedFacts ||
+                !c.noUnsupportedAdditions ||
+                !c.downstreamConsistent,
+            )
+            .map((c) => c.explanation)
+            .join("；") || "未遵守作者裁定",
+        );
         session.rejected = { patch, rejection };
         cycle.rejection = rejection;
         cycle.attempt = attempt + 1;
@@ -1200,6 +1262,8 @@ export async function reviewAndPatch({
         state.values[`final-scene:${scene.scene - 1}`] = scene.content;
       await save();
       current = proposed.scenes;
+      recordDraftVersion(state, "自动修订并复核后的草稿");
+      await save();
       accepted = true;
       break;
     }

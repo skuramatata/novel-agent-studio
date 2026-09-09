@@ -18,6 +18,8 @@ import type { Message } from "../lib/types";
 import { ReviewResolution } from "./ReviewResolution";
 import { useReviewChat } from "./useReviewChat";
 import { ReviewProgress } from "./ReviewProgress";
+import { DraftWorkspace } from "./DraftWorkspace";
+import { useDraftActions } from "./useDraftActions";
 function Candidate({ message }: { message: Message }) {
   const { accept, update, project, busy } = useStudio();
   const [expanded, setExpanded] = useState(false);
@@ -178,6 +180,7 @@ function Candidate({ message }: { message: Message }) {
 }
 export function Chat() {
   const reviewChat = useReviewChat();
+  const draftActions = useDraftActions(reviewChat.task);
   const {
     project,
     provider,
@@ -189,6 +192,7 @@ export function Chat() {
     cancel,
   } = useStudio();
   const [input, setInput] = useState("");
+  const [inputTarget, setInputTarget] = useState<"draft" | "new">("draft");
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" });
@@ -197,19 +201,22 @@ export function Chat() {
     if (
       !input.trim() ||
       busy ||
-      project!.messages.some((m) => m.status === "pending")
+      (project!.messages.some((m) => m.status === "pending") &&
+        (!draftActions.available || inputTarget === "new"))
     )
       return;
     const text = input;
     setInput("");
     const ok = reviewChat.question
       ? await reviewChat.answer(text)
-      : await generate(
-          text,
-          /^继续[吧！!。\s]*$/.test(text) && reviewChat.task?.resumable
-            ? { resume: true }
-            : {},
-        );
+      : draftActions.available && inputTarget === "draft"
+        ? await draftActions.submit(text)
+        : await generate(
+            text,
+            /^继续[吧！!。\s]*$/.test(text) && reviewChat.task?.resumable
+              ? { resume: true }
+              : {},
+          );
     if (!ok) setInput((current) => current || text);
   }
   const pending = project!.messages.some((m) => m.status === "pending");
@@ -315,19 +322,27 @@ export function Chat() {
               </article>
             )}
           <ReviewProgress progress={reviewChat.task?.reviewProgress} />
-          {!busy && reviewChat.task?.resumable && !pending && (
-            <div className="composer-hint">
-              {reviewChat.task.reviewProgress?.failure
-                ? `任务停在“${reviewChat.task.reviewProgress.label}”，草稿与作者裁定已保存。`
-                : "上次任务已保存。"}
-              <button
-                className="text-button"
-                onClick={() => void generate("恢复上次任务", { resume: true })}
-              >
-                恢复上次任务
-              </button>
-            </div>
+          {reviewChat.task?.workspace && (
+            <DraftWorkspace key={reviewChat.task.id} task={reviewChat.task} />
           )}
+          {!busy &&
+            !reviewChat.task?.workspace &&
+            reviewChat.task?.resumable &&
+            !pending && (
+              <div className="composer-hint">
+                {reviewChat.task.reviewProgress?.failure
+                  ? `任务停在“${reviewChat.task.reviewProgress.label}”，草稿与作者裁定已保存。`
+                  : "上次任务已保存。"}
+                <button
+                  className="text-button"
+                  onClick={() =>
+                    void generate("恢复上次任务", { resume: true })
+                  }
+                >
+                  恢复上次任务
+                </button>
+              </div>
+            )}
           {busy && (
             <div className="working">
               <span className="pulse" />
@@ -342,8 +357,25 @@ export function Chat() {
         <div className="composer-area">
           {pending && (
             <div className="composer-hint">
-              先采纳或放弃上一份方案，再开始下一轮生成。
+              {draftActions.available
+                ? "可以采纳当前候选，也可以直接提出修改要求，生成新候选。"
+                : "先采纳或放弃上一份方案，再开始下一轮生成。"}
             </div>
+          )}
+          {draftActions.available && !reviewChat.question && (
+            <label className="draft-scope">
+              这条要求用于
+              <select
+                aria-label="创作请求作用对象"
+                value={inputTarget}
+                onChange={(e) =>
+                  setInputTarget(e.target.value as "draft" | "new")
+                }
+              >
+                <option value="draft">当前草稿</option>
+                <option value="new">新创作任务</option>
+              </select>
+            </label>
           )}
           <div className="composer">
             <textarea
@@ -351,9 +383,11 @@ export function Chat() {
               placeholder={
                 reviewChat.question
                   ? "回答上面的问题，例如：删除这次未交代的检查，不增加新事件。"
-                  : isDesktop
-                    ? "描述你的想法，或让 Agent 帮你生成作者档案与故事规划…"
-                    : "演示模式：输入请求体验规划采纳；真实调用请使用桌面端。"
+                  : draftActions.available && inputTarget === "draft"
+                    ? "直接指导当前草稿，例如：把第2场第3段写得更克制；重新生成第2场；继续改。"
+                    : isDesktop
+                      ? "描述你的想法，或让 Agent 帮你生成作者档案与故事规划…"
+                      : "演示模式：输入请求体验规划采纳；真实调用请使用桌面端。"
               }
               value={input}
               maxLength={reviewChat.question ? 2000 : 12000}
@@ -397,7 +431,11 @@ export function Chat() {
                 <button
                   className="send"
                   aria-label="发送创作请求"
-                  disabled={!input.trim() || pending}
+                  disabled={
+                    !input.trim() ||
+                    (pending &&
+                      (!draftActions.available || inputTarget === "new"))
+                  }
                   onClick={() => void submit()}
                 >
                   <ArrowUp size={20} />
@@ -476,7 +514,10 @@ export function Chat() {
           {readyForChapter(project) && (
             <button
               className="secondary compact"
-              onClick={() => setInput(suggestions[2])}
+              onClick={() => {
+                setInputTarget("new");
+                setInput(suggestions[2]);
+              }}
             >
               起草第一章
             </button>

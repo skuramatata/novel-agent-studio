@@ -1,5 +1,6 @@
 import { digest } from "./memory.mjs";
 import { blockedStructuredRecovery } from "./structured-step.mjs";
+import { currentDraftIssueStatus } from "./revision-session.mjs";
 
 const labels = {
   review: "核对审稿发现",
@@ -11,6 +12,8 @@ const labels = {
   completed: "审稿完成",
 };
 const failureSummary = {
+  auto_limit:
+    "本回合自动修订额度已用完。草稿可查看、编辑或交付；作者继续指导后重置额度。",
   protocol_exhausted:
     "同一输入的纠错预算已用尽，已停止请求模型。草稿和诊断已保存，需修正输入或处理协议后继续。",
   invalid_result: "模型返回的结论仍不完整或未通过校验，可以从本步骤重试。",
@@ -251,6 +254,9 @@ export function authorConstraints(state, doc, { proposedChanges = [] } = {}) {
         changed = false;
       if (!matches.length && origin) {
         for (const commit of [
+          ...(state.reviewSessions || []).flatMap(
+            (s) => s.review?.commits || [],
+          ),
           ...(state.paragraphReview?.commits || []),
           { changes: proposedChanges },
         ]) {
@@ -284,6 +290,7 @@ export function authorConstraints(state, doc, { proposedChanges = [] } = {}) {
 export function reuseAuthorDecisions(state, problems, doc) {
   const w = reviewWorkflow(state);
   return problems.map((i) => {
+    if (i.authorRequested) return i;
     const c = [...w.constraints]
       .reverse()
       .find((c) => matchesAuthorDecision(c, i));
@@ -346,6 +353,14 @@ export function applyAuthorDecisions(state, problems, doc) {
     const constraint = reviewWorkflow(state).constraints.find(
       (c) => c.id === issue.authorConstraintId,
     );
+    if (constraint?.action === "keep_current")
+      return {
+        ...issue,
+        blocking: false,
+        authorRetained: true,
+        resolution: "suggestion",
+        fix: "作者选择保留此处原文。",
+      };
     if (
       !constraint ||
       constraint.action !== "preserve_evidence" ||
@@ -465,11 +480,13 @@ export async function reviewStep(state, phase, save, run) {
         ? error
         : new ReviewRetryableError(
             phase,
-            error.code === "STRUCTURED_RECOVERY_EXHAUSTED"
-              ? "protocol_exhausted"
-              : error.code === "MODEL_VALIDATION" || error.name === "ZodError"
-                ? "invalid_result"
-                : "execution",
+            error.code === "AUTHOR_REVISION_LIMIT"
+              ? "auto_limit"
+              : error.code === "STRUCTURED_RECOVERY_EXHAUSTED"
+                ? "protocol_exhausted"
+                : error.code === "MODEL_VALIDATION" || error.name === "ZodError"
+                  ? "invalid_result"
+                  : "execution",
             error.message,
           );
     w.failure = {
@@ -489,7 +506,7 @@ export async function reviewStep(state, phase, save, run) {
     throw e;
   }
 }
-export function retryReview(state) {
+export function retryReview(state, author = false) {
   const w = reviewWorkflow(state);
   if (w.failure) {
     w.retry++;
@@ -511,11 +528,11 @@ export function retryReview(state) {
       cycle.scopeExpansions = 0;
       w.phase = "grounding";
     }
-    if (w.failure.kind === "repair_limit" && cycle) {
+    if (author && w.failure.kind === "repair_limit" && cycle) {
       cycle.attempt = 0;
       delete cycle.patch;
     }
-    if (w.failure.kind === "round_limit")
+    if (author && ["round_limit", "auto_limit"].includes(w.failure.kind))
       state.paragraphReview.reviewLimit = state.paragraphReview.round + 2;
     delete w.failure;
     event(state, "resumed", { phase: w.phase });
@@ -560,6 +577,13 @@ export function reviewTaskState(state, active = false) {
   const w = state.reviewWorkflow;
   return {
     status,
+    revisionBudget: state.revisionBudget
+      ? {
+          epoch: state.revisionBudget.epoch,
+          used: state.revisionBudget.used,
+          limit: state.revisionBudget.limit,
+        }
+      : null,
     review: unanswered ? { ...pending, answers } : null,
     resumable:
       !active &&
@@ -572,6 +596,7 @@ export function reviewTaskState(state, active = false) {
         "running",
         "ready",
         "awaiting_input",
+        "awaiting_instruction",
       ].includes(status),
     reviewProgress: w
       ? {
@@ -589,7 +614,7 @@ export function reviewTaskState(state, active = false) {
             : null,
           issues: w.issues.map((i) => ({
             id: i.id,
-            status: i.status,
+            status: currentDraftIssueStatus(state, i),
             explanation: i.latest?.explanation || "",
           })),
           decisions: w.constraints.length,

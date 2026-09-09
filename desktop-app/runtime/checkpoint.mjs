@@ -13,6 +13,13 @@ import { digest } from "./memory.mjs";
 import { blockedStructuredRecovery } from "./structured-step.mjs";
 import { DEFAULT_WORD_TOLERANCE, projectWordTolerance } from "./word-range.mjs";
 import { captureCheckpointLog, appendCreationEvent } from "./creation-log.mjs";
+import {
+  authorIntervenes,
+  revisionBudget,
+  draftScenes,
+  draftVersion,
+} from "./revision-session.mjs";
+import { prepareDraftAction } from "./draft-actions.mjs";
 export const WORKFLOW_VERSION = "chapter-memory-2";
 export function baseFingerprint(p) {
   return digest({
@@ -46,6 +53,41 @@ export class Checkpoint {
   async begin(p, req, config) {
     let old = await this.read();
     const base = baseFingerprint(p);
+    if (
+      req.authorAction ||
+      (req.resume &&
+        req.authorInterventionId &&
+        !req.decision &&
+        old &&
+        draftScenes(old).length)
+    ) {
+      if (!old || old.base !== base)
+        throw Error(
+          "作品内容已变化，旧草稿不能覆盖当前作品，请基于最新正文创建任务。",
+        );
+      if (old.version !== WORKFLOW_VERSION)
+        throw Error("旧任务流程不兼容，请先恢复旧任务完成迁移。");
+      if (
+        old.provider !== config.provider ||
+        old.model !== config.model ||
+        old.baseUrl !== config.baseUrl
+      )
+        throw Error("继续草稿需要使用原来的供应商、接口与模型。");
+      prepareDraftAction(
+        old,
+        req.authorAction ||
+          old.authorActions?.find((a) => a.id === req.authorInterventionId)
+            ?.action || {
+            id: req.authorInterventionId,
+            taskId: old.id,
+            draftVersion: draftVersion(old),
+            type: "continue",
+          },
+        req.instruction || "",
+      );
+      if (!old.authorReplay) await this.write(old);
+      return old;
+    }
     if (req.resume) {
       if (
         old &&
@@ -68,6 +110,7 @@ export class Checkpoint {
           "running",
           "ready",
           "awaiting_input",
+          "awaiting_instruction",
         ].includes(old.status)
       )
         throw Error("没有可恢复的章节任务。");
@@ -126,6 +169,12 @@ export class Checkpoint {
         old.previousWorkflowVersion = old.version;
         old.version = WORKFLOW_VERSION;
       }
+      const intervention =
+        req.authorInterventionId ||
+        (req.decision ? `decision:${digest(req.decision)}` : null);
+      const author = intervention
+        ? authorIntervenes(old, intervention, req.instruction)
+        : false;
       const blocked = blockedStructuredRecovery(old);
       if (blocked) throw Error(blocked.detail);
       // 旧版可能在问答存盘后记为 failed；以未回答的问题为准恢复等待状态。
@@ -143,7 +192,9 @@ export class Checkpoint {
       )
         throw Error("请先在创作对话回答当前情节问题，再继续任务。");
       captureCheckpointLog(old);
-      if (old.reviewWorkflow) retryReview(old);
+      if (old.reviewWorkflow) retryReview(old, author);
+      if (author && old.paragraphReview)
+        old.paragraphReview.reviewLimit = old.paragraphReview.round + 2;
       appendCreationEvent(old, {
         title: req.decision ? "作者回答已收齐，继续任务" : "恢复已有任务",
         details: { 恢复步骤: old.stage },
@@ -190,6 +241,7 @@ export class Checkpoint {
       manifest: [],
       updatedAt: new Date().toISOString(),
     };
+    revisionBudget(state);
     await this.write(state);
     return state;
   }

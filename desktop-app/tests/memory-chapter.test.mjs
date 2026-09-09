@@ -244,44 +244,43 @@ test("审稿连续出现JSON语法错误和索引伪地址时有限纠错，不�
   );
 });
 
-test("三次审稿仍返回伪地址时保存失败，重复恢复不刷新预算且不采纳无效结果", async (t) => {
+test("三次审稿仍返回伪地址时转入草稿指导，自动恢复不刷新预算且不采纳无效结果", async (t) => {
   const f = await setup(1200),
     normal = responder();
   t.after(() => rm(f.dir, { recursive: true, force: true }));
   let reviewCalls = 0;
-  await assert.rejects(
-    runChapterAgent(
-      f.p,
-      config,
-      new AbortController().signal,
-      () => {},
-      f.checkpoint,
-      f.state,
-      async (url, init) => {
-        const body = JSON.parse(init.body);
-        if (!body.messages[0].content.includes("本轮只执行时间"))
-          return normal(url, init);
-        reviewCalls++;
-        return response(
-          JSON.stringify({
-            issues: [],
-            continuityChecks: [
-              {
-                dimension: "time",
-                verdict: "consistent",
-                evidence: [{ sourceId: "timeAnchors", paragraph: 0 }],
-                explanation: "错误索引",
-              },
-            ],
-          }),
-        );
-      },
-    ),
-    /引用不在本次提供的原文范围/,
+  const result = await runChapterAgent(
+    f.p,
+    config,
+    new AbortController().signal,
+    () => {},
+    f.checkpoint,
+    f.state,
+    async (url, init) => {
+      const body = JSON.parse(init.body);
+      if (!body.messages[0].content.includes("本轮只执行时间"))
+        return normal(url, init);
+      reviewCalls++;
+      return response(
+        JSON.stringify({
+          issues: [],
+          continuityChecks: [
+            {
+              dimension: "time",
+              verdict: "consistent",
+              evidence: [{ sourceId: "timeAnchors", paragraph: 0 }],
+              explanation: "错误索引",
+            },
+          ],
+        }),
+      );
+    },
   );
+  assert.equal(result.draftOnly, true);
+  assert.match(f.state.error, /引用不在本次提供的原文范围/);
   assert.equal(reviewCalls, 3);
   const saved = await f.checkpoint.read();
-  assert.equal(saved.status, "retryable");
+  assert.equal(saved.status, "awaiting_instruction");
   assert.ok(!saved.paragraphReview.cycle.continuityReview);
   await assert.rejects(
     f.checkpoint.begin(f.p, { resume: true }, config),
@@ -323,7 +322,8 @@ test("审稿截断后恢复编号变化仍沿用13000预算，不重写已存场
       state,
       fetcher,
     );
-  await assert.rejects(run(f.state), /审稿扩容后断网/);
+  assert.equal((await run(f.state)).draftOnly, true);
+  assert.match(f.state.error, /审稿扩容后断网/);
   const saved = await f.checkpoint.read();
   const resumed = await f.checkpoint.begin(f.p, { resume: true }, config);
   assert.equal(resumed.reviewWorkflow.retry, saved.reviewWorkflow.retry + 1);
@@ -1072,19 +1072,17 @@ test("修订后审稿断网仍可恢复，不拿旧引文去校验新正文", as
       }
       return normal(url, opts);
     };
-    await assert.rejects(
-      () =>
-        runChapterAgent(
-          f.p,
-          config,
-          new AbortController().signal,
-          () => {},
-          f.checkpoint,
-          f.state,
-          fetcher,
-        ),
-      /网络中断/,
+    const paused = await runChapterAgent(
+      f.p,
+      config,
+      new AbortController().signal,
+      () => {},
+      f.checkpoint,
+      f.state,
+      fetcher,
     );
+    assert.equal(paused.draftOnly, true);
+    assert.match(f.state.error, /网络中断/);
     const state = await f.checkpoint.begin(f.p, { resume: true }, config);
     const result = await runChapterAgent(
       f.p,

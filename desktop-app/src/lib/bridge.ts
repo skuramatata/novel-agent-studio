@@ -170,7 +170,7 @@ const preview: Bridge = {
     throw Error("浏览器预览不调用模型。");
   },
   generate: async (req) => {
-    if (req.mode || req.resume || req.chapterId)
+    if (req.mode || req.resume || req.chapterId || req.authorAction)
       throw Error("记忆整理与逐章生成请在桌面端运行；浏览器仅展示界面。");
     if (generating) throw Error("已有任务运行中");
     generating = true;

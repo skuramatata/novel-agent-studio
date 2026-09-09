@@ -29,6 +29,12 @@ import { DEFAULT_WORD_TOLERANCE, wordToleranceLabel } from "./word-range.mjs";
 import { appendCreationEvent, stageCategory } from "./creation-log.mjs";
 import { sceneTimeSchema } from "./continuity-schema.mjs";
 import { retrieveContinuitySources, continuityLedger } from "./continuity.mjs";
+import { runDraftWork } from "./draft-agent.mjs";
+import {
+  draftScenes,
+  pauseDraft,
+  recordDraftVersion,
+} from "./revision-session.mjs";
 
 const intentSchema = z.object({
   mode: z.enum(["discuss", "plan", "draft", "revise"]),
@@ -162,6 +168,23 @@ export async function runChapterAgent(
   const ask = createStructuredAsker({ state, budget, call, save, signal });
   try {
     const req = state.request;
+    if (state.draftWork) {
+      const result = await runDraftWork({
+        p,
+        state,
+        ask,
+        save,
+        signal,
+        profile: budget,
+      });
+      return {
+        ...result,
+        model: config.model,
+        calls: state.calls,
+        usages: state.usages,
+        promptVersion: WORKFLOW_VERSION,
+      };
+    }
     if (req.mode === "memory") {
       const targets = p.chapters.filter(
         (c) => c.content.trim() && (!req.chapterId || c.id === req.chapterId),
@@ -746,6 +769,9 @@ export async function runChapterAgent(
           continuityCoverage: state.continuityEvidence.coverage,
         }
       : context;
+    state.reviewContext = reviewContext;
+    recordDraftVersion(state, "起草完成的原始草稿");
+    await save();
     const reviewed = await reviewAndPatch({
       scenes: plan.scenes.map((_, i) => ({
         scene: i + 1,
@@ -835,6 +861,25 @@ export async function runChapterAgent(
       promptVersion: WORKFLOW_VERSION,
     };
   } catch (e) {
+    if (
+      !signal.aborted &&
+      draftScenes(state).some((s) => s.content.trim()) &&
+      (e.name === "ReviewRetryableError" ||
+        e.code === "AUTHOR_REVISION_LIMIT" ||
+        state.draftWork)
+    ) {
+      if (e.name !== "WaitingForAuthor") {
+        pauseDraft(state, e.message);
+        await save();
+        return {
+          draftOnly: true,
+          model: config.model,
+          calls: state.calls,
+          usages: state.usages,
+          promptVersion: WORKFLOW_VERSION,
+        };
+      }
+    }
     state.status = signal.aborted
       ? "interrupted"
       : e.name === "WaitingForAuthor"

@@ -186,6 +186,18 @@ export function validateRepairPlan(value, problems, doc) {
     }
     const targets = decision.targets.map((r) => located.get(r)).filter(Boolean);
     if (
+      problem.authorScope &&
+      targets.some(
+        (t) =>
+          !problem.authorScope.some(
+            (r) => r.sourceId === t.sourceId && r.paragraph === t.paragraph,
+          ),
+      )
+    )
+      failures.push(
+        `${decision.issueId}.targets：超出作者选定的修改范围，只能修改 authorScope 内的段落。`,
+      );
+    if (
       new Set(targets.map((t) => `${t.sourceId}:${t.paragraph}`)).size !==
       targets.length
     )
@@ -265,7 +277,7 @@ export async function planParagraphRepairs({
 逐项回填decisions：issueId、decision(repair/dismiss/needs_confirmation)、reason、evidence、targets。evidence填写sourceId、paragraph、可选sentence，直接复制document提供的原始编号，由程序回填原文，不抄写quote。targets填写sourceId、quote、operation及fix；quote必须是document中同一个段落内逐字连续的原文，程序据此唯一定位，不猜段号。operation=replace时quote是需要替换的最小完整错误表述；确有依据需要补充承接而原句仍正确时，使用insert_before或insert_after，quote是唯一的插入位置原文，完整保留原段，只在锚点前或后插入文字。不要为补写而修改正确原句，不要只引用标点。
 decision=repair必须有至少一个真实修改目标；decision=dismiss必须targets=[]；decision=needs_confirmation在事实取舍未定、无法确定修改目标时允许targets=[]，程序保留已校验的原问题位置用于询问作者，不因此授权修改或要求补造错误片段。三种decision都必须提供可定位的原文evidence。
 同一问题影响多段时必须列齐所有需要修改的targets，一段一个target；只有证据、无需改动的段落放evidence。不能声称改一段却在fix中要求改其他未列出的段落。所有targets必须有实际补丁；replace必须消除错误表述，insert_before/insert_after必须保持原段文字并在指定位置增加有效内容。先查提供的原文找到真实位置，不受旧target限制。coverage以外的原文未提供，不能认定其不存在；未裁定的新问题材料不足时明确needs_confirmation。
-若原文并不支持该问题、已不存在该错误、或只是风格偏好，decision=dismiss、targets=[]，列出反证。人物猜测、留白、不同时间的描写不自动构成矛盾；不擅自发明“一天只能记一条日志”等规则。现有依据和作者裁定不足以确定事实取舍才needs_confirmation；不要替作者选择关键剧情。authorConstraints和authorInstruction必须保留，已有明确裁定不重复询问。
+若原文并不支持该问题、已不存在该错误、或只是模型自己的风格偏好，decision=dismiss、targets=[]，列出反证。authorRequested=true表示作者明确要求修改，包括文风、语气、节奏；不能以只是风格偏好为由驳回，只有该要求在当前原文已落实才可dismiss。authorScope如存在就是作者授权的全部修改范围，targets不能越界；如果必须改范围外才能解决，说明需要扩大范围，不能假装局部已解决。人物猜测、留白、不同时间的描写不自动构成矛盾；不擅自发明“一天只能记一条日志”等规则。依据充足时主动选择更符合文章的统一方案；确实缺少关键事实且无法遵守作者要求时才needs_confirmation。authorConstraints和authorInstruction必须保留，已有明确裁定不重复询问。
 repair必须遵循已有preserve事实与作者裁定，不补造往事或行动。已带authorInstruction的同一问题不得再次needs_confirmation；作者明确保留的当前事实已成立时dismiss，无需为了显示修订而改写正确原文。previousFailure只是技术诊断，不是该文学问题成立的证据；应独立核对，不能为通过校验随意修改原文。
 只输出JSON：{"decisions":[{"issueId":"finding-1","decision":"repair","reason":"原文证实哪里错、为何这样修订","evidence":[{"sourceId":"recent","paragraph":1,"sentence":1}],"targets":[{"sourceId":"scene:1","quote":"需要替换的原文片段","operation":"replace","fix":"最小修改要求"}]}]}`,
       },

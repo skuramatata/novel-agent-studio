@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStudio } from "../state/StudioContext";
 import { useMemoryData } from "./useMemoryData";
 import type { Chapter } from "../lib/types";
+import { DraftWorkspace } from "./DraftWorkspace";
 import {
   chapterWordRange,
   projectWordTolerance,
@@ -116,8 +117,9 @@ export function ChapterGeneration({ chapter }: { chapter: Chapter }) {
               } as Record<string, string>
             )[task.status] || task.status}
           </p>
-          {task.error && <p>{task.error}</p>}
-          {task.resumable && !s.busy && (
+          {task.workspace && <DraftWorkspace key={task.id} task={task} />}
+          {!task.workspace && task.error && <p>{task.error}</p>}
+          {!task.workspace && task.resumable && !s.busy && (
             <button
               className="text-button"
               disabled={!!pending}
@@ -126,13 +128,13 @@ export function ChapterGeneration({ chapter }: { chapter: Chapter }) {
               恢复上次任务
             </button>
           )}
-          {!!task.draft && (
+          {!task.workspace && !!task.draft && (
             <details>
               <summary>查看当前整章草稿（尚未通过采纳）</summary>
               <div className="prose">{task.draft}</div>
             </details>
           )}
-          {!!task.fragments.length && (
+          {!task.workspace && !!task.fragments.length && (
             <details>
               <summary>查看已保存的场景草稿（未采纳）</summary>
               {task.fragments.map((f, i) => (

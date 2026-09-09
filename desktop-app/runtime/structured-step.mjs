@@ -11,6 +11,8 @@ import {
 } from "./structured.mjs";
 import { REVIEW_RESULT_VERSION } from "./review-result.mjs";
 import { REPAIR_PLAN_VERSION } from "./repair-plan.mjs";
+import { revisionBudget } from "./revision-session.mjs";
+import { authorIdProtocol } from "./review-author-ids.mjs";
 import {
   AUTHOR_CONSTRAINT_CONTEXT_VERSION,
   ARBITRATION_EVIDENCE_VERSION,
@@ -21,7 +23,7 @@ import {
   assertWorkflowStage,
 } from "./workflow-skill.mjs";
 
-export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-2:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}:${WORKFLOW_SKILL.hash}`;
+export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-2:author-ids-1:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}:${WORKFLOW_SKILL.hash}`;
 const authorStages = new Set([
   "review",
   "continuity_review",
@@ -34,6 +36,8 @@ const authorStages = new Set([
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
   const step = state.structuredSteps?.[failure?.stepId];
+  if (step && (state.revisionBudget?.epoch || 0) > (step.authorEpoch || 0))
+    return null;
   if (
     step?.contractId === "arbitration" &&
     step.arbitrationEvidenceVersion !== ARBITRATION_EVIDENCE_VERSION
@@ -87,7 +91,10 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     const contract = options.contract;
     assertWorkflowStage(state, contract);
     messages = workflowMessages(messages, contract);
+    const authorProtocol = authorIdProtocol(messages);
+    messages = authorProtocol.messages;
     const validateResponse = (raw) => {
+      raw = authorProtocol.decode(raw);
       let parsed;
       try {
         parsed = contract.parse(raw);
@@ -112,12 +119,24 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       budget.key,
       stableKey,
       baseMessages,
+      revisionBudget(state).epoch,
     ]);
     const resultOwner = state.structuredResults?.[key];
+    const previousStep = state.structuredSteps?.[resultOwner];
+    const reusableAcrossRounds = ![
+      "patch",
+      "verification",
+      "author_revision",
+      "author_verification",
+    ].includes(contract.id);
     // 旧缓存沿原检查点契约校验；新结果必须属于相同输入节点。
     if (
       Object.hasOwn(state.values, key) &&
-      (!resultOwner || resultOwner === id)
+      (!resultOwner ||
+        resultOwner === id ||
+        (reusableAcrossRounds &&
+          previousStep?.status === "succeeded" &&
+          digest(previousStep.input) === digest(baseMessages)))
     )
       return validate(structuredClone(state.values[key]));
     state.structuredSteps ??= {};
@@ -128,6 +147,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       status: "pending",
       input: structuredClone(baseMessages),
       contractId: contract.id,
+      authorEpoch: revisionBudget(state).epoch,
       ...(contract.id === "arbitration"
         ? { arbitrationEvidenceVersion: ARBITRATION_EVIDENCE_VERSION }
         : {}),
@@ -259,7 +279,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       try {
         value = validateResponse(parseStructured(response.text));
       } catch (error) {
-        const detail = validationReason(error);
+        const detail = authorProtocol.diagnostic(validationReason(error));
         step.lastFailure = {
           kind: error instanceof SyntaxError ? "syntax" : "validation",
           name: error.name,

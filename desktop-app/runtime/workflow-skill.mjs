@@ -25,6 +25,8 @@ const phases = Object.freeze({
   memory_extract: null,
   proposal: null,
   prose: null,
+  author_revision: null,
+  author_verification: null,
   review: "review",
   continuity_review: "review",
   arbitration: "arbitration",

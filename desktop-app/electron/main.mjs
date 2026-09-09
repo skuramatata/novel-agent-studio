@@ -29,6 +29,11 @@ import {
 } from "../runtime/providers.mjs";
 import { runChapterAgent } from "../runtime/chapter-agent.mjs";
 import { Checkpoint, baseFingerprint } from "../runtime/checkpoint.mjs";
+import {
+  draftWorkspaceView,
+  isDraftActionReplay,
+} from "../runtime/draft-actions.mjs";
+import { draftScenes } from "../runtime/revision-session.mjs";
 import { isReviewDecisionReplay } from "../runtime/review-resolution.mjs";
 import {
   readCreationLogs,
@@ -193,6 +198,7 @@ handle("task", (id) =>
     const state = await new Checkpoint(store.directoryFor(id)).read();
     if (!state) return null;
     const taskView = reviewTaskState(state, !!active);
+    const workspace = draftWorkspaceView(state);
     const status =
       state.status !== "completed" && state.base !== baseFingerprint(p)
         ? "stale"
@@ -205,6 +211,12 @@ handle("task", (id) =>
       chapterId: state.chapterId,
       review: status === "stale" ? null : taskView.review,
       reviewProgress: taskView.reviewProgress,
+      workspace: workspace
+        ? {
+            ...workspace,
+            canGuide: !active && state.base === baseFingerprint(p),
+          }
+        : null,
       updatedAt: state.updatedAt,
       manifest: state.manifest,
       draft: Object.entries(state.values)
@@ -357,10 +369,36 @@ async function executeGenerate(req, controller) {
     )
       return p;
   }
-  if (req.revision !== p.revision) throw new Error("作品版本已变化，请重试。");
-  if (p.messages.some((m) => m.status === "pending"))
-    throw new Error("请先采纳或放弃上一份方案。");
   const runDir = store.directoryFor(req.projectId);
+  const oldTask = await new Checkpoint(runDir).read();
+  const repeatAction =
+    req.authorAction ||
+    (req.resume &&
+      req.authorInterventionId &&
+      oldTask?.authorActions?.find((a) => a.id === req.authorInterventionId)
+        ?.action);
+  if (
+    repeatAction &&
+    oldTask?.base === baseFingerprint(p) &&
+    oldTask.provider === req.provider &&
+    isDraftActionReplay(oldTask, repeatAction, req.instruction || "")
+  )
+    return p;
+  if (req.revision !== p.revision) throw new Error("作品版本已变化，请重试。");
+  const guiding =
+    !!req.authorAction ||
+    !!(
+      req.resume &&
+      req.authorInterventionId &&
+      oldTask &&
+      draftScenes(oldTask).length
+    );
+  if (
+    p.messages.some(
+      (m) => m.status === "pending" && (!guiding || m.taskId !== oldTask?.id),
+    )
+  )
+    throw new Error("请先采纳或放弃其他任务的方案。");
   const signal = AbortSignal.any([
     controller.signal,
     AbortSignal.timeout(RUN_TIMEOUT_MS),
@@ -414,6 +452,29 @@ async function executeGenerate(req, controller) {
   try {
     const config = (await loadConfig())[req.provider];
     checkpointState = await checkpoint.begin(p, req, config);
+    if (checkpointState.authorReplay) return p;
+    if (guiding && p.messages.some((m) => m.status === "pending")) {
+      p = await serial(async () => {
+        const latest = await store.load(req.projectId);
+        if (latest.revision !== p.revision)
+          throw Error("作品版本已变化，请重新操作。");
+        return store.save(
+          {
+            ...latest,
+            messages: latest.messages.map((m) =>
+              m.status === "pending" && m.taskId === checkpointState.id
+                ? {
+                    ...m,
+                    status: "rejected",
+                    handledAt: new Date().toISOString(),
+                  }
+                : m,
+            ),
+          },
+          latest.revision,
+        );
+      });
+    }
     p = await syncReviewMessages();
     if (
       checkpointState.decisionReplay ||
@@ -435,6 +496,14 @@ async function executeGenerate(req, controller) {
       );
     } finally {
       retrieval.close();
+    }
+    if (generated.draftOnly) {
+      await record({
+        status: checkpointState.status,
+        stage: checkpointState.stage,
+        calls: checkpointState.calls,
+      });
+      return await syncReviewMessages();
     }
     const legacyBaseCalls = checkpointState.calls;
     const result = generated.legacy
@@ -523,7 +592,7 @@ async function executeGenerate(req, controller) {
         ...latest,
         messages: [
           ...latest.messages,
-          ...(req.decision
+          ...(req.decision || guiding
             ? []
             : [
                 {

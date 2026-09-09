@@ -8,6 +8,7 @@ const statusNames: Record<string, string> = {
   verifying: "待复核",
   verified: "已复核",
   closed: "已关闭",
+  stale: "原文已变化，留作历史记录",
 };
 export function ReviewProgress({
   progress,
