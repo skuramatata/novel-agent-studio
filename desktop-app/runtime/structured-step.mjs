@@ -12,15 +12,47 @@ import {
 import { REVIEW_RESULT_VERSION } from "./review-result.mjs";
 import { REPAIR_PLAN_VERSION } from "./repair-plan.mjs";
 import {
+  AUTHOR_CONSTRAINT_CONTEXT_VERSION,
+  ARBITRATION_EVIDENCE_VERSION,
+} from "./review-payload.mjs";
+import {
   WORKFLOW_SKILL,
   workflowMessages,
   assertWorkflowStage,
 } from "./workflow-skill.mjs";
 
 export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-2:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}:${WORKFLOW_SKILL.hash}`;
+const authorStages = new Set([
+  "review",
+  "continuity_review",
+  "grounding",
+  "arbitration",
+  "patch",
+  "verification",
+]);
 
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
+  const step = state.structuredSteps?.[failure?.stepId];
+  if (
+    step?.contractId === "arbitration" &&
+    step.arbitrationEvidenceVersion !== ARBITRATION_EVIDENCE_VERSION
+  )
+    return null;
+  // 只迁移受裁定上下文协议变更影响的旧失败。历史尝试及其他步骤预算仍保留。
+  if (
+    authorStages.has(step?.contractId) &&
+    step.authorContextVersion !== AUTHOR_CONSTRAINT_CONTEXT_VERSION &&
+    step.input?.some((message) => {
+      if (message.role !== "user") return false;
+      try {
+        return JSON.parse(message.content).authorConstraints?.length > 0;
+      } catch {
+        return false;
+      }
+    })
+  )
+    return null;
   return state.status !== "completed" &&
     failure?.version === STRUCTURED_RECOVERY_VERSION
     ? failure
@@ -96,6 +128,12 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       status: "pending",
       input: structuredClone(baseMessages),
       contractId: contract.id,
+      ...(contract.id === "arbitration"
+        ? { arbitrationEvidenceVersion: ARBITRATION_EVIDENCE_VERSION }
+        : {}),
+      ...(authorStages.has(contract.id)
+        ? { authorContextVersion: AUTHOR_CONSTRAINT_CONTEXT_VERSION }
+        : {}),
       skill: { ...WORKFLOW_SKILL },
       corrections: 0,
       expansions: 0,

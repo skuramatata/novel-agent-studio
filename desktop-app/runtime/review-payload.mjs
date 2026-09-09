@@ -4,6 +4,11 @@ export const reference = ({ sourceId, paragraph, sentence }) => ({
   ...(sentence === undefined ? {} : { sentence }),
 });
 
+export const AUTHOR_CONSTRAINT_CONTEXT_VERSION = "scoped-author-context-1";
+export const ARBITRATION_EVIDENCE_VERSION = "indexed-arbitration-evidence-1";
+export const AUTHOR_CONSTRAINT_RULES = `authorConstraints按sequence记录作答先后，scope.originalTarget是每次选择针对的原问题。选中的整句是该问题的事实依据，不等于永久锁定同句无关细节。后来的明确选择只调整同一冲突涉及的取舍，其他旧裁定仍须遵守，不自行扩大授权。
+facts.quote始终是原始事实快照。currentReference为null不等于裁定已违反；currentContextReferences是沿已提交补丁定位的现稿上下文，scope.currentReferences是原问题在现稿的位置。须回查实际原文，不把上下文当旧引文的逐字匹配或裁定自动通过。原问题若是人物姓名，后来改变毛毯去向，应检查人物选择是否保留，不把附带持物动作变化当作违背旧决定。没有可靠当前位置时不能猜旧段号或随意拿邻段代替证据。`;
+
 // 记忆表的数组下标不是正文地址。仅为本批逐字命中的引文提供可复制地址；
 // 未命中条目仍保留为回查线索，不能凭摘要补造证据或把第 0 项当第 0 段。
 export function modelContinuity(ledger, doc) {

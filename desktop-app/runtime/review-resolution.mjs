@@ -2,7 +2,12 @@ import { runLocalTasks } from "./review-context.mjs";
 import { z } from "zod";
 import { workflowContract } from "./workflow-skill.mjs";
 import { digest } from "./memory.mjs";
-import { modelFindings, modelDocument } from "./review-payload.mjs";
+import {
+  modelFindings,
+  modelDocument,
+  AUTHOR_CONSTRAINT_RULES,
+  ARBITRATION_EVIDENCE_VERSION,
+} from "./review-payload.mjs";
 import {
   reviewWorkflow,
   markIssues,
@@ -293,15 +298,23 @@ export async function resolveReviewProblems({
       {
         role: "system",
         content:
-          '你是连续性裁决员。不要因为审稿员写了需要确认就找作者。依据首次正面描写、明确时间及相关后文判断。能有依据统一时action=preserve_evidence，选择要保留的evidence编号（从1开始）；缺少前情且仅删除断言即可时action=remove_unsupported，不能编造对白或往事。只有关键剧情无法裁决时action=needs_confirmation。不得把人物谎言、感知差异或不同时刻武断合并。只输出JSON：{"decisions":[{"issueId":"...","action":"preserve_evidence","evidenceIndexes":[1],"reason":"具体依据"}]}。',
+          '你是连续性裁决员。不要因为审稿员写了需要确认就找作者。依据首次正面描写、明确时间及相关后文判断。能有依据统一时action=preserve_evidence，evidenceIndexes仅选择当前问题evidence条目明确给出的index；编号在每个问题内从1重新开始，不是document的段号、句号、来源序号，也不能给回查中新发现的依据自行编号。额外原文可用于reason解释，待保留的事实仍从当前问题已有evidence中选择。缺少前情且仅删除断言即可时action=remove_unsupported，不能编造对白或往事。只有关键剧情无法裁决时action=needs_confirmation，evidenceIndexes为空，不能一边说无法确定一边输出preserve_evidence。不得把人物谎言、感知差异或不同时刻武断合并。只输出JSON：{"decisions":[{"issueId":"...","action":"preserve_evidence","evidenceIndexes":[1],"reason":"具体依据"}]}。',
       },
       {
         role: "user",
         content: JSON.stringify({
-          issues: modelFindings(group),
+          evidenceProtocol: ARBITRATION_EVIDENCE_VERSION,
+          issues: modelFindings(group).map((issue) => ({
+            ...issue,
+            evidence: issue.evidence.map((ref, index) => ({
+              index: index + 1,
+              ...ref,
+            })),
+          })),
           authorConstraints: authorConstraints(state, doc),
           constraintPolicy:
-            "必须遵守已有作者裁定，不能重新裁决或推翻；只有新的、未被裁定覆盖的关键事实才询问作者。",
+            AUTHOR_CONSTRAINT_RULES +
+            "只有新的、未被裁定覆盖的关键事实才询问作者。",
           document: modelDocument(view),
         }),
       },
@@ -313,6 +326,7 @@ export async function resolveReviewProblems({
         new Set(out.decisions.map((d) => d.issueId)).size !== group.length
       )
         throw Error("裁决必须逐项覆盖疑问。");
+      const errors = [];
       for (const d of out.decisions) {
         const issue = group.find((i) => i.id === d.issueId);
         if (!issue) throw Error("未知裁决问题");
@@ -321,7 +335,9 @@ export async function resolveReviewProblems({
           (!d.evidenceIndexes.length ||
             d.evidenceIndexes.some((n) => !issue.evidence[n - 1]))
         )
-          throw Error("裁决缺少可定位的保留依据");
+          errors.push(
+            `${d.issueId}: evidenceIndexes=${JSON.stringify(d.evidenceIndexes)} 缺少可定位的保留依据。仅可选该问题 evidence[].index 中的 ${issue.evidence.map((_, i) => i + 1).join("、")}，不能使用其他问题或原文段落编号。若确实无法裁决，应返回 needs_confirmation。`,
+          );
         if (
           d.action === "remove_unsupported" &&
           !["missing_history", "unsupported_inference"].includes(issue.kind)
@@ -332,6 +348,7 @@ export async function resolveReviewProblems({
             "现有证据无法确定矛盾双方应保留哪一方，需要作者确认；不能自动删除已有事实。";
         }
       }
+      if (errors.length) throw Error(errors.join("\n"));
       return out;
     },
     label: "核对原文与后文，尝试自动裁决",

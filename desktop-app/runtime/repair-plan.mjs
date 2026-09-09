@@ -1,7 +1,11 @@
 import { runLocalTasks } from "./review-context.mjs";
 import { z } from "zod";
 import { digest } from "./memory.mjs";
-import { modelDocument, modelFindings } from "./review-payload.mjs";
+import {
+  modelDocument,
+  modelFindings,
+  AUTHOR_CONSTRAINT_RULES,
+} from "./review-payload.mjs";
 import { workflowContract } from "./workflow-skill.mjs";
 
 export const REPAIR_PLAN_VERSION = "anchored-repair-2";
@@ -270,6 +274,7 @@ repair必须遵循已有preserve事实与作者裁定，不补造往事或行动
         content: JSON.stringify({
           issues: modelFindings(group),
           authorConstraints,
+          constraintPolicy: AUTHOR_CONSTRAINT_RULES,
           previousFailure: feedback || null,
           document: modelDocument(view, { explicitSentences: true }),
         }),

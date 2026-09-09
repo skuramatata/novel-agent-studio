@@ -211,27 +211,72 @@ export function rememberDecisions(state, pendingId, issues) {
     event(state, "author_decided", { constraintId: id, issueId: i.ledgerId });
   }
 }
-export function authorConstraints(state, doc) {
-  return reviewWorkflow(state).constraints.map((c) => ({
+export function authorConstraints(state, doc, { proposedChanges = [] } = {}) {
+  const locate = (ref, exact = false) => {
+    const source = doc.sources.find((s) => s.sourceId === ref?.sourceId);
+    const matches = (source?.paragraphs || []).flatMap((p) => {
+      if (p.text === ref.quote)
+        return [{ sourceId: ref.sourceId, paragraph: p.paragraph }];
+      const sentences = p.sentences.filter((s) =>
+        exact ? s.text === ref.quote : s.text.includes(ref.quote),
+      );
+      return sentences.map((s) => ({
+        sourceId: ref.sourceId,
+        paragraph: p.paragraph,
+        sentence: s.sentence,
+      }));
+    });
+    return matches.length === 1 ? matches : [];
+  };
+  return reviewWorkflow(state).constraints.map((c, index) => ({
     id: c.id,
+    sequence: index + 1,
     instruction: c.instruction,
     action: c.action,
+    // 选择整句是针对当时的问题；不能把附带细节扩大为永久逐字锁定。
+    scope: {
+      kind: c.kind,
+      originalTarget: { sourceId: c.target?.sourceId, quote: c.target?.quote },
+      currentReferences: c.target?.quote ? locate(c.target) : [],
+    },
     facts: c.facts.map((f) => {
-      const source = doc.sources.find((s) => s.sourceId === f.sourceId);
-      const matches = (source?.paragraphs || []).flatMap((p) => {
-        if (p.text === f.quote)
-          return [{ sourceId: f.sourceId, paragraph: p.paragraph }];
-        return p.sentences
-          .filter((s) => s.text === f.quote)
-          .map((s) => ({
-            sourceId: f.sourceId,
-            paragraph: p.paragraph,
-            sentence: s.sentence,
-          }));
-      });
+      const matches = locate(f, true);
+      // 沿已提交补丁及本次已通过范围校验的候选补丁回查，不沿用旧段号。
+      // 这里只提供回查上下文；绝不把替换后的文字冒充旧引文或自动认定裁定已遵守。
+      const origin = [c.target, ...(c.evidence || [])].find(
+        (r) =>
+          r?.sourceId === f.sourceId && r.quote === f.quote && r.sourceHash,
+      );
+      let text = f.quote,
+        changed = false;
+      if (!matches.length && origin) {
+        for (const commit of [
+          ...(state.paragraphReview?.commits || []),
+          { changes: proposedChanges },
+        ]) {
+          const changes = (commit.changes || []).filter(
+            (change) =>
+              change.sourceId === f.sourceId &&
+              (changed
+                ? change.before === text
+                : change.sourceHash === origin.sourceHash &&
+                  change.before.includes(text)),
+          );
+          if (changes.length !== 1) continue;
+          text = changes[0].replacement;
+          changed = true;
+        }
+      }
+      const contextReferences =
+        changed && text?.trim()
+          ? locate({ sourceId: f.sourceId, quote: text }, true)
+          : [];
       return {
         ...f,
         currentReference: matches.length === 1 ? matches[0] : null,
+        ...(contextReferences.length
+          ? { currentContextReferences: contextReferences }
+          : {}),
       };
     }),
   }));
