@@ -6,6 +6,7 @@ export function repairPlanResponse(data) {
       .find((s) => s.sourceId === ref.sourceId)
       .paragraphs.find((p) => p[0] === ref.paragraph)
       .slice(1)
+      .map((sentence) => (Array.isArray(sentence) ? sentence[1] : sentence))
       .join(""),
   });
   return {

@@ -390,6 +390,7 @@ export async function runLocalTasks({
   messagesFor,
   validate,
   merge,
+  maxCorrections = 1,
 }) {
   const groups = profile ? issueGroups(issues) : [issues];
   const results = [];
@@ -413,19 +414,36 @@ export async function runLocalTasks({
       }
       throw error;
     }
+    const validateResult = (value) => {
+      const failures = [];
+      let result;
+      try {
+        assertVisibleReferences(value, view);
+      } catch (error) {
+        failures.push(validationReason(error));
+      }
+      try {
+        result = validate(value, group, view);
+      } catch (error) {
+        failures.push(validationReason(error));
+      }
+      if (failures.length) throw Error([...new Set(failures)].join("\n"));
+      return result;
+    };
     const raw = await ask(
       profile ? `local-context-1:${hash(messages)}` : key,
       messages,
       (value) => {
-        validate(assertVisibleReferences(value, view), group, view);
+        validateResult(value);
         return value;
       },
       requestOutput(output, profile),
       groups.length > 1
         ? `${label} · 问题组 ${results.length + 1}/${groups.length}`
         : label,
+      { maxCorrections },
     );
-    results.push(validate(assertVisibleReferences(raw, view), group, view));
+    results.push(validateResult(raw));
   };
   for (const group of groups) await execute(group);
   return merge(results);

@@ -579,6 +579,10 @@ export async function auditContinuity({
         failures.push(
           "continuityChecks必须分别核对time、state、evidence，不得重复或漏项。",
         );
+      // 其他字段未通过校验不表示issues缺失；这里只用原始结构检查关联，
+      // failures仍阻止无效结果被接受，避免误导模型重复新增已有问题。
+      const diagnosticIssues =
+        result?.issues || reviewSchema.safeParse(value).data?.issues || [];
       for (const check of checks.data) {
         if (check.evidence.length > 8)
           failures.push(
@@ -590,7 +594,7 @@ export async function auditContinuity({
           );
         if (
           check.verdict === "problem" &&
-          !(result?.issues || []).some((i) =>
+          !diagnosticIssues.some((i) =>
             check.evidence.some(
               (r) =>
                 r.sourceId === i.target.sourceId &&

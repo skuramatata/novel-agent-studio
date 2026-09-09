@@ -180,7 +180,7 @@ export async function runChapterAgent(
       tokens = requestOutput(Math.max(tokens, previous), budget);
     let corrections = 0,
       expansions = 0;
-    // 审稿最多两次纠错，其他任务保持一次；加上两次输出扩容，最多五次请求。
+    // 审稿与修订依据核对最多两次纠错；加上两次输出扩容，最多五次请求。
     for (let attempt = 0; attempt < 3 + maxCorrections; attempt++) {
       const response = await call(messages, tokens, label, true);
       let rawKey = `raw:${key}:${attempt}`;
