@@ -171,6 +171,40 @@ test("已答自定义问题仍需要执行时，模型不能再次返回needs_co
   );
 });
 
+test("复审把整段缩为作者选定的一句并改换证据时，仍认得旧版保留裁定", () => {
+  const state = {};
+  confirmed(state);
+  delete state.reviewWorkflow.constraints[0].kind;
+  const narrowed = {
+    ...finding,
+    target: finding.evidence[1],
+    evidence: [finding.evidence[1]],
+  };
+  assert.equal(
+    applyAuthorDecisions(state, [narrowed], doc)[0].authorRetained,
+    true,
+  );
+  const [original] = trackFindings(state, [narrowed], doc.version);
+  const [retained] = trackFindings(
+    state,
+    applyAuthorDecisions(state, [original], doc),
+    doc.version,
+  );
+  assert.equal(
+    state.reviewWorkflow.issues.find((i) => i.id === retained.ledgerId).status,
+    "closed",
+  );
+  for (const other of [
+    { ...narrowed, kind: "contradiction" },
+    { ...narrowed, target: { ...narrowed.target, quote: "杏枝" } },
+    { ...narrowed, target: { ...narrowed.target, quote: "她抱着那条毛毯。" } },
+  ])
+    assert.equal(
+      applyAuthorDecisions(state, [other], doc)[0].authorRetained,
+      undefined,
+    );
+});
+
 test("旧版重复问题投影为可恢复，复用原答案且不增加作答记录", () => {
   const state = stateFor();
   confirmed(state);

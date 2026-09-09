@@ -134,6 +134,13 @@ function registerFindings(state, findings, documentVersion) {
           ? "open"
           : "advisory";
     }
+    if (finding.authorRetained)
+      markIssues(
+        state,
+        [{ ...finding, ledgerId: item.id }],
+        "closed",
+        "作者已确认保留当前断言",
+      );
     item.latest = structuredClone(finding);
     item.documentVersion = documentVersion;
     return { ...finding, ledgerId: item.id };
@@ -256,6 +263,18 @@ export function reuseAuthorDecisions(state, problems, doc) {
 
 function matchesAuthorDecision(constraint, issue) {
   if (constraint.issueSignature === signature(issue)) return true;
+  // 复审可能把整段目标缩到作者选定的完整一句；这仍是同一保留事实。
+  // 只接受精确事实文本，不因共享段号、关键词或部分字符串而沿用授权。
+  if (
+    constraint.action === "preserve_evidence" &&
+    ["missing_history", "unsupported_inference"].includes(issue.kind) &&
+    constraint.facts.some(
+      (fact) =>
+        fact.sourceId === issue.target.sourceId &&
+        fact.quote === issue.target.quote,
+    )
+  )
+    return true;
   // 稳定编号只能辅助关联，不能把同段后来发现的另一个问题当作已经回答。
   return (
     constraint.kind === issue.kind &&
@@ -284,7 +303,12 @@ export function applyAuthorDecisions(state, problems, doc) {
       constraint.action !== "preserve_evidence" ||
       !["missing_history", "unsupported_inference"].includes(issue.kind) ||
       constraint.target.sourceId !== issue.target.sourceId ||
-      constraint.target.quote !== issue.target.quote ||
+      (constraint.target.quote !== issue.target.quote &&
+        !constraint.facts.some(
+          (fact) =>
+            fact.sourceId === issue.target.sourceId &&
+            fact.quote === issue.target.quote,
+        )) ||
       !issue.preserve.some(
         (r) =>
           r.sourceId === issue.target.sourceId &&
@@ -321,7 +345,12 @@ function repeatedAuthorAnswers(state) {
           c.target.sourceId === issue.target.sourceId &&
           c.target.sourceHash &&
           c.target.sourceHash === issue.target.sourceHash &&
-          c.target.quote === issue.target.quote,
+          (c.target.quote === issue.target.quote ||
+            c.facts.some(
+              (fact) =>
+                fact.sourceId === issue.target.sourceId &&
+                fact.quote === issue.target.quote,
+            )),
       );
     if (!c) return null;
     return {
