@@ -3,13 +3,30 @@ export { estimatedTokens, ensureBudget } from "./model-budget.mjs";
 import { createHash } from "node:crypto";
 import { continuityLedger } from "./continuity.mjs";
 import { CONTINUITY_MEMORY_RULES } from "./continuity-schema.mjs";
+import { workflowContract } from "./workflow-skill.mjs";
+import { z } from "zod";
 import { selectMemoryRecords } from "./memory-selection.mjs";
 import { INLINE_EVIDENCE_FORMAT } from "./memory-transport.mjs";
 import {
   extractedMemorySchema,
+  memoryRecordSchema,
   MEMORY_RECORD_LIMIT,
   MEMORY_SUMMARY_LIMIT,
 } from "./memory-schema.mjs";
+const sourceMemorySchema = extractedMemorySchema.extend({
+  records: z
+    .array(
+      memoryRecordSchema
+        .omit({ quote: true })
+        .extend({ sourceId: z.number().int().positive() }),
+    )
+    .max(MEMORY_RECORD_LIMIT),
+});
+const extractionContract = workflowContract(
+  "memory_extract",
+  z.union([sourceMemorySchema, extractedMemorySchema]),
+  { displaySchema: sourceMemorySchema },
+);
 export const digest = (value) =>
   createHash("sha256")
     .update(typeof value === "string" ? value : JSON.stringify(value))
@@ -126,6 +143,7 @@ export async function indexChapter(
       (value) => validateExtraction(value, source.text, { continuity }),
       continuity ? 6000 : 3500,
       `整理第 ${chapter.number} 章记忆 · ${part + 1}/${parts.length}`,
+      { contract: extractionContract },
     );
     entries.push({
       ...value,

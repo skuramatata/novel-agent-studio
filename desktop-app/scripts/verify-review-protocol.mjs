@@ -162,6 +162,7 @@ assert.ok(
 );
 let state = {
   id: "isolated-review",
+  reviewWorkflow: { phase: "review" },
   status: "running",
   values: {},
   fragments: {},
@@ -209,6 +210,7 @@ if (live) {
   assert.ok(config.apiKey, "未找到已配置的原供应商密钥");
   state = {
     id: "isolated-live-review",
+    reviewWorkflow: { phase: "review" },
     status: "running",
     values: {},
     fragments: {},

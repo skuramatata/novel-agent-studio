@@ -11,8 +11,13 @@ import {
 } from "./structured.mjs";
 import { REVIEW_RESULT_VERSION } from "./review-result.mjs";
 import { REPAIR_PLAN_VERSION } from "./repair-plan.mjs";
+import {
+  WORKFLOW_SKILL,
+  workflowMessages,
+  assertWorkflowStage,
+} from "./workflow-skill.mjs";
 
-export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-1:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}`;
+export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-2:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}:${WORKFLOW_SKILL.hash}`;
 
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
@@ -47,6 +52,27 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     options = {},
   ) {
     signal?.throwIfAborted();
+    const contract = options.contract;
+    assertWorkflowStage(state, contract);
+    messages = workflowMessages(messages, contract);
+    const validateResponse = (raw) => {
+      let parsed;
+      try {
+        parsed = contract.parse(raw);
+      } catch (error) {
+        // 字段错误不掩盖本批原文范围等诊断；任何一层失败都不能接收结果。
+        const reasons = [validationReason(error)];
+        try {
+          validate(raw);
+        } catch (domainError) {
+          reasons.push(validationReason(domainError));
+        }
+        throw Object.assign(Error([...new Set(reasons)].join("\n")), {
+          code: "MODEL_CONTRACT",
+        });
+      }
+      return validate(parsed);
+    };
     const baseMessages = messages;
     const stableKey = key.replace(/:workflow-1:retry-\d+/g, "");
     const id = digest([
@@ -69,6 +95,8 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       label,
       status: "pending",
       input: structuredClone(baseMessages),
+      contractId: contract.id,
+      skill: { ...WORKFLOW_SKILL },
       corrections: 0,
       expansions: 0,
       calls: 0,
@@ -76,7 +104,9 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       outputBudget: requestOutput(tokens, budget),
     });
     if (step.status === "succeeded") {
-      const value = validate(parseStructured(state.fragments[step.rawKey]));
+      const value = validateResponse(
+        parseStructured(state.fragments[step.rawKey]),
+      );
       state.values[key] = value;
       (state.structuredResults ??= {})[key] = id;
       await save();
@@ -189,7 +219,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       }
       let value;
       try {
-        value = validate(parseStructured(response.text));
+        value = validateResponse(parseStructured(response.text));
       } catch (error) {
         const detail = validationReason(error);
         step.lastFailure = {

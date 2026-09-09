@@ -1,5 +1,6 @@
 import { runLocalTasks } from "./review-context.mjs";
 import { z } from "zod";
+import { workflowContract } from "./workflow-skill.mjs";
 import { digest } from "./memory.mjs";
 import { modelFindings, modelDocument } from "./review-payload.mjs";
 import {
@@ -10,6 +11,24 @@ import {
   reuseAuthorDecisions,
 } from "./review-workflow.mjs";
 
+const arbitrationSchema = z.object({
+  decisions: z
+    .array(
+      z.object({
+        issueId: z.string(),
+        action: z.enum([
+          "preserve_evidence",
+          "remove_unsupported",
+          "needs_confirmation",
+        ]),
+        evidenceIndexes: z.array(z.number().int().positive()).max(8),
+        reason: z.string().min(1).max(1200),
+      }),
+    )
+    .max(32),
+});
+
+const arbitrationContract = workflowContract("arbitration", arbitrationSchema);
 export function reviewQuestion(pending, issue) {
   const index = pending.issues.findIndex((i) => i.id === issue.id) + 1;
   const explanation = issue.explanation
@@ -267,6 +286,7 @@ export async function resolveReviewProblems({
     profile,
     output: 3500,
     stage: "arbitrate",
+    contract: arbitrationContract,
     ask,
     key: `arbitrate-v1:${doc.version}:${digest(uncertain)}`,
     messagesFor: (view, group) => [
@@ -287,24 +307,7 @@ export async function resolveReviewProblems({
       },
     ],
     validate: (v, group) => {
-      const out = z
-        .object({
-          decisions: z
-            .array(
-              z.object({
-                issueId: z.string(),
-                action: z.enum([
-                  "preserve_evidence",
-                  "remove_unsupported",
-                  "needs_confirmation",
-                ]),
-                evidenceIndexes: z.array(z.number().int().positive()).max(8),
-                reason: z.string().min(1).max(1200),
-              }),
-            )
-            .max(32),
-        })
-        .parse(v);
+      const out = arbitrationSchema.parse(v);
       if (
         out.decisions.length !== group.length ||
         new Set(out.decisions.map((d) => d.issueId)).size !== group.length

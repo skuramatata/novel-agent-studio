@@ -2,6 +2,7 @@ import { runLocalTasks } from "./review-context.mjs";
 import { z } from "zod";
 import { digest } from "./memory.mjs";
 import { modelDocument, modelFindings } from "./review-payload.mjs";
+import { workflowContract } from "./workflow-skill.mjs";
 
 export const REPAIR_PLAN_VERSION = "anchored-repair-2";
 const anchor = z.object({
@@ -39,6 +40,7 @@ const planSchema = z.object({
     )
     .max(32),
 });
+const groundingContract = workflowContract("grounding", planSchema);
 
 // 仅为纠错提供候选原文，绝不据相似文本自动改来源或放宽逐字校验。
 function anchorCorrection(doc, ref) {
@@ -248,6 +250,7 @@ export async function planParagraphRepairs({
     profile,
     output: 5500,
     stage: "grounding",
+    contract: groundingContract,
     maxCorrections: 2,
     ask,
     key: `${REPAIR_PLAN_VERSION}:grounding:${doc.version}:${digest([problems, authorConstraints, feedback])}:retry-${retry}`,

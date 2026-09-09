@@ -53,19 +53,6 @@ const response = (text, finish = "stop") =>
                 ? text
                 : JSON.stringify({
                     ...text,
-                    ...(Array.isArray(text?.issues)
-                      ? {
-                          continuityChecks: ["time", "state", "evidence"].map(
-                            (dimension) => ({
-                              dimension,
-                              verdict: "not_applicable",
-                              evidence: [],
-                              explanation:
-                                "本模拟样本只验证恢复和补丁流程，不含该项可检查的事实。",
-                            }),
-                          ),
-                        }
-                      : {}),
                     ...(Array.isArray(text?.scenes)
                       ? {
                           scenes: text.scenes.map((s) => ({
@@ -97,7 +84,6 @@ function missingFinding(data) {
         kind: "missing_history",
         target: { sourceId: "scene:1", paragraph: 1 },
         evidence: [{ sourceId: "scene:1", paragraph: 1 }],
-        searchedSources: data.document.sources.map((s) => s.sourceId),
         explanation: "给定范围内缺少事件出处",
         resolution: "remove_unsupported",
         fix: "删除无依据断言",
@@ -161,6 +147,16 @@ function responder(seen = [], failAt = 0) {
     }));
     if (sys.includes("独立修订依据核对员"))
       return response(repairPlanResponse(data));
+    if (sys.includes("本轮只执行时间"))
+      return response({
+        dimensions: ["time", "state", "evidence"].map((dimension) => ({
+          dimension,
+          verdict: "not_applicable",
+          evidence: [],
+          explanation: "模拟样本没有本项待检查的事实",
+        })),
+        authorChecks,
+      });
     if (sys.includes("小说连续性与文学审稿员"))
       return response({ issues: [], authorChecks });
     if (sys.includes("小说段落修订编辑")) return patchResponse(data);
@@ -1064,7 +1060,7 @@ test("修订后审稿断网仍可恢复，不拿旧引文去校验新正文", as
     const fetcher = async (url, opts) => {
       const b = JSON.parse(opts.body),
         sys = b.messages[0].content;
-      if (sys.includes("小说连续性与文学审稿员")) {
+      if (sys.includes("当前步骤：review。")) {
         reviewCount++;
         if (reviewCount === 1)
           return response(missingFinding(JSON.parse(b.messages[1].content)));
@@ -1183,7 +1179,7 @@ test("新章节审稿按段落编号回填引文，修订收到真实原文而�
         const b = JSON.parse(o.body),
           sys = b.messages[0].content,
           data = JSON.parse(b.messages[1].content);
-        if (sys.includes("小说连续性与文学审稿员") && ++reviews === 1) {
+        if (sys.includes("当前步骤：review。") && ++reviews === 1) {
           assert.equal(data.document.sources[0].paragraphs[0][0], 1);
           return response(missingFinding(data));
         }
@@ -1434,7 +1430,7 @@ test("完整章节链路暂停后提交作者选择，保留场景并继续到�
       sys = b.messages[0].content,
       data = JSON.parse(b.messages[1].content);
     if (sys.includes("仅写当前场景")) writes++;
-    if (sys.includes("小说连续性与文学审稿员") && ++reviews === 1) {
+    if (sys.includes("当前步骤：review。") && ++reviews === 1) {
       const v = missingFinding(data);
       v.issues[0].resolution = "needs_confirmation";
       return response(v);

@@ -4,6 +4,7 @@ import { stageInputLimit, requestOutput } from "./model-capabilities.mjs";
 import { modelDocument } from "./review-payload.mjs";
 import { validationReason } from "./structured.mjs";
 import { REVIEW_RESULT_VERSION, remapReviewChecks } from "./review-result.mjs";
+import { workflowMessages } from "./workflow-skill.mjs";
 
 const hash = (value) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
@@ -180,7 +181,7 @@ export function batchReviewDocuments(
 }
 export async function runReviewBatches({
   doc,
-  messagesFor,
+  messagesFor: inputMessagesFor,
   validate,
   ask,
   key,
@@ -191,7 +192,11 @@ export async function runReviewBatches({
   stage = "review",
   state,
   save,
+  contract,
 }) {
+  const messagesFor = contract
+    ? (view) => workflowMessages(inputMessagesFor(view), contract)
+    : inputMessagesFor;
   output = requestOutput(output, profile);
   const views = batchReviewDocuments(doc, messagesFor, {
     profile,
@@ -243,7 +248,7 @@ export async function runReviewBatches({
       views.length === 1
         ? label
         : `${label} · 分批 ${index + 1}/${views.length}`,
-      { maxCorrections: 2 },
+      { maxCorrections: 2, contract },
     );
     results.push(validateResult(result));
     if (views.length > 1 && state) {
@@ -411,6 +416,7 @@ export async function runLocalTasks({
   validate,
   merge,
   maxCorrections = 1,
+  contract,
 }) {
   const groups = profile ? issueGroups(issues) : [issues];
   const results = [];
@@ -425,6 +431,7 @@ export async function runLocalTasks({
           })
         : doc;
       messages = messagesFor(view, group);
+      if (contract) messages = workflowMessages(messages, contract);
       ensureBudget(messages, requestOutput(output, profile), profile);
     } catch (error) {
       const smaller = issueGroups(group, 1);
@@ -461,7 +468,7 @@ export async function runLocalTasks({
       groups.length > 1
         ? `${label} · 问题组 ${results.length + 1}/${groups.length}`
         : label,
-      { maxCorrections },
+      { maxCorrections, contract },
     );
     results.push(validateResult(raw));
   };

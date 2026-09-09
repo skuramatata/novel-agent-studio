@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runDag } from "./dag.mjs";
+import { workflowContract } from "./workflow-skill.mjs";
 import {
   planSchema,
   characterSchema,
@@ -57,6 +58,19 @@ const batchSchema = z
       .max(200),
   })
   .strict();
+const foundationSchema = z
+  .object({
+    plan: planSchema.partial().optional(),
+    characters: z.array(characterSchema).max(80).optional(),
+    relations: z.array(relationSchema).max(300).optional(),
+  })
+  .strict();
+const planningIntentContract = workflowContract(
+  "planning_intent",
+  intentSchema,
+);
+const foundationContract = workflowContract("foundation", foundationSchema);
+const outlinesContract = workflowContract("outlines", batchSchema);
 export function selectOutlineBatch(value, numbers, total) {
   const parsed = batchSchema.parse(value);
   const ids = parsed.chapters.map((c) => c.number);
@@ -97,6 +111,7 @@ export async function runPlanningDag(
     (v) => validatePlanningIntent(v, instruction, p.premise),
     1200,
     "识别创作规模与规划任务",
+    { contract: planningIntentContract },
   );
   if (intent.mode === "legacy") return { legacy: true };
   const premise = {
@@ -130,6 +145,9 @@ export async function runPlanningDag(
         validate,
         tokens,
         label,
+        {
+          contract: id === "foundation" ? foundationContract : outlinesContract,
+        },
       ),
   });
   const base = { instruction, author: p.author, premise };
@@ -148,14 +166,7 @@ export async function runPlanningDag(
         relations: p.relations,
       }),
       (value) => {
-        const parsed = z
-          .object({
-            plan: planSchema.partial().optional(),
-            characters: z.array(characterSchema).max(80).optional(),
-            relations: z.array(relationSchema).max(300).optional(),
-          })
-          .strict()
-          .parse(value);
+        const parsed = foundationSchema.parse(value);
         const plan = { ...p.plan };
         for (const field of Object.keys(p.plan)) {
           if (!p.plan[field].trim()) plan[field] = parsed.plan?.[field] || "";

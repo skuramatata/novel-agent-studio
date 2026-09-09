@@ -2,6 +2,7 @@ import { fitWritingContext } from "./context-budget.mjs";
 import { z } from "zod";
 import { complete } from "./providers.mjs";
 import { createStructuredAsker } from "./structured-step.mjs";
+import { workflowContract, proseWorkflowMessages } from "./workflow-skill.mjs";
 import { createBudgetProfile, observeTokenUsage } from "./model-budget.mjs";
 import { requestOutput, inputLimit } from "./model-capabilities.mjs";
 import { applyProposal, readyForChapter } from "./schema.mjs";
@@ -51,6 +52,8 @@ const scenesSchema = z.object({
     .min(1)
     .max(16),
 });
+const intentContract = workflowContract("task_intent", intentSchema);
+const scenesContract = workflowContract("scene_plan", scenesSchema);
 
 export async function runChapterAgent(
   p,
@@ -73,6 +76,7 @@ export async function runChapterAgent(
   const budget = createBudgetProfile(config, state.tokenBudget);
   state.tokenBudget = budget;
   async function call(messages, tokens, label, partial = false) {
+    if (!partial) messages = proseWorkflowMessages(messages);
     tokens = requestOutput(tokens, budget);
     signal.throwIfAborted();
     state.stage = label;
@@ -251,6 +255,7 @@ export async function runChapterAgent(
         },
         3500,
         "确定章节任务",
+        { contract: intentContract },
       );
       // ask 会重新校验旧缓存；把归一后的目标写回，恢复不再沿用推算总字数。
       state.values["intent-v2"] = task;
@@ -440,6 +445,7 @@ export async function runChapterAgent(
       },
       5000,
       "规划本章场景",
+      { contract: scenesContract },
     );
     const budgets = plan.scenes.map(
       (_, i) => Math.floor(words / count) + (i < words % count ? 1 : 0),

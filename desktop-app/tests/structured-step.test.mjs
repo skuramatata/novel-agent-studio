@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { workflowContract } from "../runtime/workflow-skill.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -21,6 +23,13 @@ const validate = (v) => {
   return v;
 };
 const json = JSON.stringify({ paragraph: 1 });
+const testContract = workflowContract(
+  "task_intent",
+  z.union([
+    z.object({ paragraph: z.number() }),
+    z.object({ input: z.string() }),
+  ]),
+);
 function fixture() {
   let state = { id: "task", status: "running", values: {}, fragments: {} },
     persisted;
@@ -36,7 +45,17 @@ function fixture() {
       state = JSON.parse(persisted);
     },
     ask(call, customSave = save) {
-      return createStructuredAsker({ state, budget, call, save: customSave });
+      const ask = createStructuredAsker({
+        state,
+        budget,
+        call,
+        save: customSave,
+      });
+      return (key, messages, validate, tokens, label, options) =>
+        ask(key, messages, validate, tokens, label, {
+          contract: testContract,
+          ...options,
+        });
     },
     save,
   };
@@ -54,21 +73,42 @@ const run = (ask, retry = 0, input = messages) =>
 test("相同逻辑键但输入变化不能命中旧结果，恢复旧输入仍复用原响应", async () => {
   const f = fixture();
   const ask = f.ask(async (messages) =>
-    response(JSON.stringify({ input: messages[0].content })),
+    response(JSON.stringify({ input: messages[1].content })),
   );
   assert.deepEqual(
-    await ask("same-key", [{ role: "user", content: "旧原文" }], (v) => v),
+    await ask(
+      "same-key",
+      [
+        { role: "system", content: "读取原文" },
+        { role: "user", content: "旧原文" },
+      ],
+      (v) => v,
+    ),
     { input: "旧原文" },
   );
   assert.deepEqual(
-    await ask("same-key", [{ role: "user", content: "新原文" }], (v) => v),
+    await ask(
+      "same-key",
+      [
+        { role: "system", content: "读取原文" },
+        { role: "user", content: "新原文" },
+      ],
+      (v) => v,
+    ),
     { input: "新原文" },
   );
   f.restart();
   assert.deepEqual(
     await f.ask(async () => {
       throw Error("成功输入不可重跑");
-    })("same-key", [{ role: "user", content: "旧原文" }], (v) => v),
+    })(
+      "same-key",
+      [
+        { role: "system", content: "读取原文" },
+        { role: "user", content: "旧原文" },
+      ],
+      (v) => v,
+    ),
     { input: "旧原文" },
   );
 });
@@ -93,7 +133,8 @@ for (const bad of ['{"paragraph":30"}', '{"paragraph":30}']) {
     await run(
       f.ask(async (sent) => {
         assert.deepEqual(sent, failedRequest);
-        assert.deepEqual(sent.slice(0, 2), messages);
+        assert.equal(sent[1].content, messages[1].content);
+        assert.ok(sent[0].content.startsWith(messages[0].content));
         assert.match(sent.at(-1).content, /校验失败/);
         return response(json);
       }),

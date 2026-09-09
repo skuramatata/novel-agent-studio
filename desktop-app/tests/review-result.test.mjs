@@ -51,7 +51,9 @@ const audit = (value) =>
     ledger: {},
     ask: async (_, messages, validate) => {
       const example = JSON.parse(
-        messages[0].content.split("格式示例（请按实际原文填写）：")[1],
+        messages[0].content
+          .split("格式示例（请按实际原文填写）：")[1]
+          .split("\n\n[必需工作流技能")[0],
       );
       assert.ok(example.dimensions);
       assert.equal(example.issues, undefined);

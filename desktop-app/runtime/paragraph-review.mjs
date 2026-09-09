@@ -1,5 +1,6 @@
 import { runReviewBatches, runLocalTasks } from "./review-context.mjs";
 import { validationReason } from "./structured.mjs";
+import { workflowContract } from "./workflow-skill.mjs";
 import {
   REVIEW_RESULT_VERSION,
   suppliedReviewScope,
@@ -125,6 +126,54 @@ const verificationSchema = z.object({
     .min(1)
     .max(32),
 });
+const reviewContract = workflowContract("review", reviewSchema);
+const verificationContract = workflowContract(
+  "verification",
+  verificationSchema,
+);
+const patchContract = workflowContract(
+  "patch",
+  patchSchema.partial({ baseVersion: true }),
+  { displaySchema: patchSchema.omit({ baseVersion: true }) },
+);
+const continuityCheckSchema = z.object({
+  dimension: z.enum(["time", "state", "evidence"]),
+  verdict: z.enum(["consistent", "problem", "insufficient", "not_applicable"]),
+  evidence: z.array(address),
+  explanation: z.string().min(1).max(1000),
+});
+const specialistSchema = reviewSchema.omit({ issues: true }).extend({
+  dimensions: z
+    .array(
+      z.union([
+        z.object({
+          dimension: continuityCheckSchema.shape.dimension,
+          verdict: z.literal("issues"),
+          issues: z.array(findingSchema).min(1).max(16),
+        }),
+        continuityCheckSchema.extend({
+          verdict: z.enum(["consistent", "insufficient", "not_applicable"]),
+        }),
+      ]),
+    )
+    .length(3),
+});
+// 旧格式是明确声明的兼容协议，不允许模型任意增加字段。
+const specialistContract = workflowContract(
+  "continuity_review",
+  z.union([
+    specialistSchema,
+    reviewSchema.extend({
+      continuityChecks: z.array(continuityCheckSchema).length(3),
+    }),
+  ]),
+  { displaySchema: specialistSchema },
+);
+export function bindPatchVersion(value, doc) {
+  if (value.baseVersion !== undefined && value.baseVersion !== doc.version)
+    throw Error("补丁原文版本不匹配，不能应用过期补丁。");
+  return { ...value, baseVersion: doc.version };
+}
 
 // 保留原始分隔符与字符偏移，应用补丁不重新拼接未修改段落。
 export function paragraphs(text) {
@@ -562,6 +611,7 @@ export async function auditContinuity({
     ask,
     key: `${key}:${REVIEW_RESULT_VERSION}`,
     stage: "continuity",
+    contract: specialistContract,
     pins: constraints,
     messagesFor: (view) => [
       {
@@ -798,6 +848,7 @@ export async function reviewAndPatch({
           save,
           ask,
           pins: [hints, constraints],
+          contract: reviewContract,
           key: `${REVIEW_VERSION}:review:${doc.version}:${digest([hints, constraints])}:${REVIEW_RESULT_VERSION}${retryKey()}`,
           messagesFor: (view) => [
             { role: "system", content: reviewPrompt() },
@@ -984,12 +1035,13 @@ export async function reviewAndPatch({
               profile,
               output: 5000,
               stage: "patch",
+              contract: patchContract,
               ask,
               key: `${patchKey}:${attempt}${retryKey()}`,
               messagesFor: (view, group) => [
                 {
                   role: "system",
-                  content: `你是小说段落修订编辑。只能替换问题target指定的段落；若有allowedTargets，可同时修订其中直接冲突的段落，其余正文由程序保留。preserve是必须保留的有来源事实。remove_unsupported只能删去或改写无出处断言，禁止临时添加对白、过去事件、人物行动或知情来圆说。authorInstruction是作者明确的取舍，允许按其指定改变冲突事实；除此以外仍禁止编造。保留有效细节与语气，不为字数重新写整个场景。若不能在范围内解决，不伪造解决结果。repairTargets是独立核对后的实际修订清单。operation=replace必须改掉quote所指的错误；operation=insert_before/insert_after必须保留原段，只在quote锚点前/后插入所需内容，不能为了补写而改掉正确原句。必须覆盖每个目标，不能只改其他句子或漏改相关段。每个replacement仅一个段落，可以为空以删除冗余段落。只输出JSON：{"baseVersion":"所给版本","replacements":[{"sourceId":"scene:1","paragraph":1,"issueIds":["所给问题ID"],"replacement":"这一段完整的新文字"}]}`,
+                  content: `你是小说段落修订编辑。只能替换问题target指定的段落；若有allowedTargets，可同时修订其中直接冲突的段落，其余正文由程序保留。preserve是必须保留的有来源事实。remove_unsupported只能删去或改写无出处断言，禁止临时添加对白、过去事件、人物行动或知情来圆说。authorInstruction是作者明确的取舍，允许按其指定改变冲突事实；除此以外仍禁止编造。保留有效细节与语气，不为字数重新写整个场景。若不能在范围内解决，不伪造解决结果。repairTargets是独立核对后的实际修订清单。operation=replace必须改掉quote所指的错误；operation=insert_before/insert_after必须保留原段，只在quote锚点前/后插入所需内容，不能为了补写而改掉正确原句。必须覆盖每个目标，不能只改其他句子或漏改相关段。每个replacement仅一个段落，可以为空以删除冗余段落。原文版本由程序绑定，不输出baseVersion。只输出JSON：{"replacements":[{"sourceId":"scene:1","paragraph":1,"issueIds":["所给问题ID"],"replacement":"这一段完整的新文字"}]}`,
                 },
                 {
                   role: "user",
@@ -1008,6 +1060,7 @@ export async function reviewAndPatch({
                 },
               ],
               validate: (value, group) => {
+                value = bindPatchVersion(value, doc);
                 applyParagraphPatch(current, doc, group, value);
                 return patchSchema.parse(value);
               },
@@ -1059,6 +1112,7 @@ export async function reviewAndPatch({
           profile,
           output: 5000,
           stage: "verify",
+          contract: verificationContract,
           ask,
           key: `${patchKey}:verify:${digest(patch)}${retryKey()}`,
           messagesFor: (view, group) => [
