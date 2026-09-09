@@ -1,0 +1,18 @@
+# 本机密钥；仅提交空值示例
+.env
+.env.*
+*.env
+!.env.example
+
+# 依赖、构建与本机验证输出
+node_modules/
+dist/
+release/
+verification/
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+
+# 通过 npm run prepare:embedding 下载，保留清单与上游说明
+/desktop-app/models/*/

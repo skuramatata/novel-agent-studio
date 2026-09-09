@@ -1,0 +1,76 @@
+{
+  "version": "作品修订 r1",
+  "passed": true,
+  "chapters": [
+    {
+      "number": 1,
+      "title": "到岛",
+      "chars": 7070
+    },
+    {
+      "number": 2,
+      "title": "塔与账",
+      "chars": 6165
+    },
+    {
+      "number": 3,
+      "title": "呼名",
+      "chars": 6395
+    },
+    {
+      "number": 4,
+      "title": "陈婆的账",
+      "chars": 7285
+    },
+    {
+      "number": 5,
+      "title": "旧日志",
+      "chars": 7009
+    },
+    {
+      "number": 6,
+      "title": "报务",
+      "chars": 6544
+    },
+    {
+      "number": 7,
+      "title": "补给船",
+      "chars": 6546
+    }
+  ],
+  "editRecords": 203,
+  "elapsedDays": 60,
+  "sourceUnchanged": true,
+  "sourceSha256": "f9d4af4c49b9c4b2c7cd3d80546ce54625a8c1bdf58b588934869bcf339ddee9",
+  "revisedSha256": "4c949999071dace460552690ae0ab4bfeb78336701a4b512d952410a53d74b93",
+  "retrieval": {
+    "chapter6": {
+      "scannedChapters": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "totalParagraphs": 589,
+      "suppliedParagraphs": 100,
+      "suppliedChars": 7411,
+      "sourceFingerprint": "4f8af16a684f81f396d58fa8c65f3a43846855e0d29b51a1278ac8551c47aa94",
+      "policy": "程序扫描全部此前正文，模型只读选中的原文及邻段。没有命中不等于全书不存在；材料不足时报告范围，不编造前情。"
+    },
+    "chapter5": {
+      "scannedChapters": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "totalParagraphs": 477,
+      "suppliedParagraphs": 100,
+      "suppliedChars": 7462,
+      "sourceFingerprint": "78b06dd183beb1509c88e1a1ea70467e6f176c95aef48ca0fd1e746cb5fa3a9a",
+      "policy": "程序扫描全部此前正文，模型只读选中的原文及邻段。没有命中不等于全书不存在；材料不足时报告范围，不编造前情。"
+    }
+  },
+  "method": "全文人工通读与定向修订；逐处精确命中检查；使用连续性模块校验日期差及历史原文回查；未进行全书模型审稿。"
+}
