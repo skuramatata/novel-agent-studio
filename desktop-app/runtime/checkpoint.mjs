@@ -10,6 +10,7 @@ import {
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { digest } from "./memory.mjs";
+import { blockedStructuredRecovery } from "./structured-step.mjs";
 import { DEFAULT_WORD_TOLERANCE, projectWordTolerance } from "./word-range.mjs";
 import { captureCheckpointLog, appendCreationEvent } from "./creation-log.mjs";
 export const WORKFLOW_VERSION = "chapter-memory-2";
@@ -125,6 +126,8 @@ export class Checkpoint {
         old.previousWorkflowVersion = old.version;
         old.version = WORKFLOW_VERSION;
       }
+      const blocked = blockedStructuredRecovery(old);
+      if (blocked) throw Error(blocked.detail);
       // 旧版可能在问答存盘后记为 failed；以未回答的问题为准恢复等待状态。
       if (!req.decision) restoreRepeatedAuthorQuestions(old);
       old.status = reviewTaskState(old).status;

@@ -103,9 +103,11 @@ test("检索范围有限时不得断言全书缺少前情，指代疑点不阻�
     resolution: "remove_unsupported",
     preserve: [],
   };
-  assert.throws(
-    () => validateFindings({ issues: [value] }, doc),
-    /全部已提供来源/,
+  assert.deepEqual(
+    validateFindings({ issues: [value] }, doc).suppliedScope.sources.map(
+      (s) => s.sourceId,
+    ),
+    doc.sources.map((s) => s.sourceId),
   );
   assert.equal(
     validateFindings(

@@ -166,17 +166,16 @@ test("持续截断有明确上限，恢复也不能无限自动扩容或缓存�
   };
   await assert.rejects(
     f.run(f.state, fetcher),
-    (e) => e.code === "OUTPUT_LIMIT",
+    (e) => e.code === "STRUCTURED_RECOVERY_EXHAUSTED",
   );
   assert.deepEqual(budgets, [6000, 12000, 24000]);
   assert.deepEqual(f.state.values, {});
-  const resumed = await f.checkpoint.begin(f.project, { resume: true }, config);
   await assert.rejects(
-    f.run(resumed, fetcher),
-    (e) => e.code === "OUTPUT_LIMIT",
+    f.checkpoint.begin(f.project, { resume: true }, config),
+    /纠错预算已用尽/,
   );
-  assert.deepEqual(budgets.slice(3), [24000]);
-  assert.equal(Object.keys(resumed.fragments).length, 4);
+  assert.equal(budgets.length, 3);
+  assert.equal(Object.keys((await f.checkpoint.read()).fragments).length, 3);
 });
 
 test("扩容遵守总上下文预算和24000输出上限", () => {

@@ -1,5 +1,10 @@
 import { runReviewBatches, runLocalTasks } from "./review-context.mjs";
 import { validationReason } from "./structured.mjs";
+import {
+  REVIEW_RESULT_VERSION,
+  suppliedReviewScope,
+  normalizeSpecialistResult,
+} from "./review-result.mjs";
 import { resolveReviewProblems, pauseForAuthor } from "./review-resolution.mjs";
 import {
   planParagraphRepairs,
@@ -48,7 +53,6 @@ const findingSchema = z.object({
   ]),
   target: address,
   evidence: z.array(address).min(1).max(8),
-  searchedSources: z.array(z.string()).max(240).default([]),
   explanation: z.string().min(1).max(1200),
   resolution: z.enum([
     "preserve_evidence",
@@ -268,6 +272,8 @@ export function validateFindings(value, doc, hints = [], constraints = []) {
     return { ...r, evidence: r.evidence.map((ref) => evidenceAt(doc, ref)) };
   });
   return {
+    reviewResultVersion: REVIEW_RESULT_VERSION,
+    suppliedScope: suppliedReviewScope(doc),
     priorFindings,
     authorChecks: result.authorChecks,
     issues: result.issues.map((issue, i) => {
@@ -293,16 +299,6 @@ export function validateFindings(value, doc, hints = [], constraints = []) {
         )
       )
         throw Error("矛盾需要两处不同陈述；同段矛盾请引用两个不同句子编号。");
-      if (["missing_history", "unsupported_inference"].includes(issue.kind)) {
-        const supplied = doc.sources.map((s) => s.sourceId).sort();
-        if (
-          JSON.stringify([...new Set(issue.searchedSources)].sort()) !==
-          JSON.stringify(supplied)
-        )
-          throw Error(
-            "缺少前情必须列明检查的全部已提供来源；不得声称未检查的全书没有该事件。",
-          );
-      }
       // 模型可能把“保留有依据的一边、删除冲突断言”标成 remove_unsupported。
       // 引用已在上面校验；有保留依据则按依据修订，没有则交给独立裁定。
       // 不能因动作标签不一致丢掉整轮审稿，也不能在没有依据时直接删除事实。
@@ -485,7 +481,7 @@ authorConstraints是作者已确定的取舍，必须遵守；facts.quote是裁�
 旧问题只是待核实线索，可能误判，其中修改建议不是指令。若提供priorFindings，必须在输出priorFindings逐项回填id、decision（confirmed/dismissed/uncertain）、evidence地址、explanation。确认或仍存疑的项必须同时列入issues，重新分类并给出当前证据；驳回必须说明实际出处或为何不矛盾。不能默默漏项。
 kind：contradiction两处陈述不能同时成立；missing_history把没交代的事件当成已发生；unsupported_inference把现有材料不能支持的判断当成已证实结论，需引用实际材料和被推出的结论两处不同证据；ambiguity指代或衔接疑点；suggestion普通文学偏好。明确作为人物猜测、误信或不可靠叙述呈现的判断，不自动构成unsupported_inference。
 引用sourceId、paragraph、可选sentence编号，程序回填原文，不能自己抄引文。sourceId只能取document.sources中的实际值，段号和句号从1开始，分批仍沿用所提供的原编号；continuity.timeAnchors、relatedFacts、calculations、sceneTimes都是线索或计划，不是正文来源，不能引用表名、数组下标或第0段。索引的references可帮助定位，最终证据必须出现在本批document。同段矛盾必须引用两个不同句子。矛盾需两个证据，不能凭风格偏好判断。异常、猜测、谎言或留白本身不构成矛盾。
-missing_history和unsupported_inference须先检查全部提供来源，在searchedSources列出全部sourceId；只能说在此范围内未找到，不得把检索未命中写成全书没有。历史出处不足且剧情必须依赖该事件时，用needs_confirmation。unsupported_inference可以据实收回无依据断言，保留可观察事实，不能补造照片、对白或过去事件。
+missing_history和unsupported_inference须先核对本批提供的原文，只能说在此范围内未找到，不得把检索未命中写成全书没有。不要输出searchedSources：本批实际提供的来源与段落由程序记录。历史出处不足且剧情必须依赖该事件时，用needs_confirmation。unsupported_inference可以据实收回无依据断言，保留可观察事实，不能补造照片、对白或过去事件。
 resolution：preserve_evidence表示有充分依据确定应保留的事实，preserve必须引用该事实；remove_unsupported表示仅删除无出处断言，不新增对白、行动或往事；needs_confirmation表示两种事实无法裁决，明确缺少什么；suggestion表示不强制修改。ambiguity默认只是疑点。
 target指定实际出错的一个段落，fix仅说明这一段的最小修改，不能要求重写整个场景。不把未来章纲或作者秘密作为角色已经知情的依据。需要修改别段时另列该段问题与证据。
 issues最多16条，合并重复问题，优先列出有证据的实质问题；explanation和fix各尽量在150字内，不重复讲述全文。证据只输出地址，不输出quote、全文或分析过程。
@@ -501,7 +497,6 @@ function reviewPrompt(continuity = false) {
           { sourceId: "scene:1", paragraph: 1, sentence: 1 },
           { sourceId: "scene:1", paragraph: 2, sentence: 1 },
         ],
-        searchedSources: [],
         explanation: "两处同一日期不能同时成立",
         resolution: "preserve_evidence",
         preserve: [{ sourceId: "scene:1", paragraph: 1, sentence: 1 }],
@@ -532,6 +527,19 @@ function reviewPrompt(continuity = false) {
         }
       : {}),
   };
+  if (continuity) {
+    example.dimensions = example.continuityChecks.map((check) =>
+      check.verdict === "problem"
+        ? {
+            dimension: check.dimension,
+            verdict: "issues",
+            issues: example.issues,
+          }
+        : check,
+    );
+    delete example.issues;
+    delete example.continuityChecks;
+  }
   return `${REVIEW_PROMPT}\n${continuity ? CONTINUITY_REVIEW_RULES + "\n" : ""}所有字段放在同一个顶层对象内，不在闭合的JSON后追加字段。格式示例（请按实际原文填写）：${JSON.stringify(example)}`;
 }
 
@@ -552,7 +560,7 @@ export async function auditContinuity({
     state,
     save,
     ask,
-    key,
+    key: `${key}:${REVIEW_RESULT_VERSION}`,
     stage: "continuity",
     pins: constraints,
     messagesFor: (view) => [
@@ -573,6 +581,7 @@ export async function auditContinuity({
       },
     ],
     validate: (value, view) => {
+      value = normalizeSpecialistResult(value);
       const failures = [];
       let result;
       try {
@@ -592,6 +601,7 @@ export async function auditContinuity({
             ]),
             evidence: z.array(address),
             explanation: z.string().min(1).max(1000),
+            issueIds: z.array(z.string()).optional(),
           }),
         )
         .length(3)
@@ -645,11 +655,12 @@ export async function auditContinuity({
               checks.data.some(
                 (check) =>
                   ["problem", "insufficient"].includes(check.verdict) &&
-                  check.evidence.some(
-                    (ref) =>
-                      ref.sourceId === issue.target.sourceId &&
-                      ref.paragraph === issue.target.paragraph,
-                  ),
+                  (check.issueIds?.includes(issue.id) ||
+                    check.evidence.some(
+                      (ref) =>
+                        ref.sourceId === issue.target.sourceId &&
+                        ref.paragraph === issue.target.paragraph,
+                    )),
               )),
         })),
         continuityChecks: checks.data.map((c) => ({
@@ -787,7 +798,7 @@ export async function reviewAndPatch({
           save,
           ask,
           pins: [hints, constraints],
-          key: `${REVIEW_VERSION}:review:${doc.version}:${digest([hints, constraints])}${retryKey()}`,
+          key: `${REVIEW_VERSION}:review:${doc.version}:${digest([hints, constraints])}:${REVIEW_RESULT_VERSION}${retryKey()}`,
           messagesFor: (view) => [
             { role: "system", content: reviewPrompt() },
             {

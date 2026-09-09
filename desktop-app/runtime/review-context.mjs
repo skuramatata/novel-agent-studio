@@ -3,6 +3,7 @@ import { estimatedTokens, ensureBudget } from "./model-budget.mjs";
 import { stageInputLimit, requestOutput } from "./model-capabilities.mjs";
 import { modelDocument } from "./review-payload.mjs";
 import { validationReason } from "./structured.mjs";
+import { REVIEW_RESULT_VERSION, remapReviewChecks } from "./review-result.mjs";
 
 const hash = (value) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
@@ -270,14 +271,33 @@ export async function runReviewBatches({
     for (const a of result.authorChecks || [])
       if (!authors.has(a.id) || !a.respected) authors.set(a.id, a);
   }
+  const mergedIssues = [...issues.values()].map((issue, i) => ({
+    ...issue,
+    id: `batch-${doc.version.slice(0, 12)}-${i + 1}`,
+  }));
+  const mergedIds = new Map(
+    [...issues.keys()].map((key, i) => [key, mergedIssues[i].id]),
+  );
   return {
-    issues: [...issues.values()].map((issue, i) => ({
-      ...issue,
-      id: `batch-${doc.version.slice(0, 12)}-${i + 1}`,
-    })),
+    reviewResultVersion: REVIEW_RESULT_VERSION,
+    issues: mergedIssues,
     priorFindings: [...priors.values()],
     authorChecks: [...authors.values()],
-    continuityChecks: results.flatMap((r) => r.continuityChecks || []),
+    continuityChecks: results.flatMap(
+      (r) =>
+        remapReviewChecks(
+          r.continuityChecks,
+          new Map(
+            r.issues.map((i) => [
+              i.id,
+              mergedIds.get(hash([i.kind, i.target, i.evidence])),
+            ]),
+          ),
+        ) || [],
+    ),
+    suppliedScopes: results.flatMap((r) =>
+      r.suppliedScope ? [r.suppliedScope] : [],
+    ),
     batchCoverage: { total: views.length, completed: results.length },
   };
 }

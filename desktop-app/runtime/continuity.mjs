@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { remapReviewChecks } from "./review-result.mjs";
 
 export const CONTINUITY_VERSION = 1;
 const hash = (value) =>
@@ -272,27 +273,36 @@ export const CONTINUITY_REVIEW_RULES = `本轮只执行时间、事实与证据�
 5. continuitySources来自独立回查的历史原文，continuity只作索引，冲突以实际引文为依据。timeAnchors/relatedFacts的references是程序按本批原文逐字定位的地址，可复制后核对；references为空时只能作为待回查线索，不能用索引表名、数组下标替代sourceId/paragraph。目标仅限当前章；历史原有矛盾说明来源不确定，不强行选一方。
 6. 修订必须同时检查同章所有受同一日期或物件事实影响的段落，分别报告实际出错段；不补造往事来圆说。允许零问题；不把待解谜团当连续性错误。
 7. 没有绝对日期仍须依据正文核对相对时序，不因此把time填为insufficient且不给证据。完全不涉及某维度才用not_applicable；insufficient用于原文中确有待核对断言而必要依据不足，须引用该断言。evidence维度覆盖所有观察、证词和推断，不只检查誊抄件这一例子。
-必须另返回continuityChecks，恰好三项，dimension分别time/state/evidence。每项为{dimension,verdict,evidence,explanation}；verdict只能consistent/problem/insufficient/not_applicable；evidence为实际原文地址数组，只有not_applicable可以为空。explanation说明时间、状态转移或推理依据为何成立/不成立，不用“已检查”代替分析。problem必须同时在issues列出可定位的问题。未知日期或有意留白本身不要求修改；若材料不足已影响当前结论且必须裁定，列出issues并用needs_confirmation，即使分类为ambiguity也会进入依据裁定，不能一边要求裁定一边放行。
+本轮只返回dimensions、authorChecks和priorFindings；dimensions恰好三项，dimension分别time/state/evidence。发现问题时该维度只填{dimension,verdict:"issues",issues:[完整问题]}，依据、说明和修订要求仅在问题项中填写一次，不再另写顶层issues或continuityChecks。没有待处理问题时填{dimension,verdict:"consistent"或"insufficient"或"not_applicable",evidence:[实际原文地址],explanation:"依据"}；只有not_applicable可以没有证据。程序从维度内的问题直接生成问题列表和汇总状态，不需要模型重复维护。三个维度合计最多16个问题。未知日期或有意留白本身不要求修改；若材料不足已影响当前结论且必须裁定，必须在对应维度内列出问题并用needs_confirmation，即使分类为ambiguity也会进入依据裁定。
 推理依据专项应明确角色实际持有什么材料，以及该材料能支持哪一步结论。没有原件、照片或明确摹写过程，却据普通誊抄件断言原签名的用笔习惯时，引用材料形态和结论两处，归unsupported_inference；只能明确收回无依据的肯定结论或交由裁定，不能凭空补拍照、摹写等前情。材料形态本身不明才归ambiguity；明确只是人物怀疑时不要当成作者已证实的结论。不能仅因为恐怖题材就默认誊抄保留笔迹。`;
 
 export function mergeContinuityReview(specialist, general) {
+  const issueKey = (i) =>
+    JSON.stringify([
+      i.kind,
+      i.target.sourceId,
+      i.target.paragraph,
+      i.evidence.map((e) => e.quote).sort(),
+    ]);
   const seen = new Set();
   const issues = [...specialist.issues, ...general.issues]
     .sort((a, b) => Number(b.blocking) - Number(a.blocking))
     .filter((i) => {
-      const key = JSON.stringify([
-        i.kind,
-        i.target.sourceId,
-        i.target.paragraph,
-        i.evidence.map((e) => e.quote).sort(),
-      ]);
+      const key = issueKey(i);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
+  const ids = new Map(issues.map((i, n) => [issueKey(i), `finding-${n + 1}`]));
   return {
     ...general,
-    continuityChecks: specialist.continuityChecks,
+    continuityChecks: remapReviewChecks(
+      specialist.continuityChecks,
+      new Map(specialist.issues.map((i) => [i.id, ids.get(issueKey(i))])),
+    ),
+    suppliedScopes: [specialist, general].flatMap(
+      (r) => r.suppliedScopes || (r.suppliedScope ? [r.suppliedScope] : []),
+    ),
     issues: issues.map((i, n) => ({ ...i, id: `finding-${n + 1}` })),
   };
 }

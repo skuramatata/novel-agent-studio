@@ -1,12 +1,7 @@
 import { fitWritingContext } from "./context-budget.mjs";
 import { z } from "zod";
 import { complete } from "./providers.mjs";
-import {
-  parseStructured,
-  structuredRetryMessages,
-  largerStructuredOutput,
-  MAX_STRUCTURED_OUTPUT,
-} from "./structured.mjs";
+import { createStructuredAsker } from "./structured-step.mjs";
 import { createBudgetProfile, observeTokenUsage } from "./model-budget.mjs";
 import { requestOutput, inputLimit } from "./model-capabilities.mjs";
 import { applyProposal, readyForChapter } from "./schema.mjs";
@@ -160,117 +155,7 @@ export async function runChapterAgent(
     signal.throwIfAborted();
     return result;
   }
-  async function ask(
-    key,
-    messages,
-    validate,
-    tokens = 4000,
-    label = key,
-    options = {},
-  ) {
-    const maxCorrections = options.maxCorrections === 2 ? 2 : 1;
-    tokens = requestOutput(tokens, budget);
-    if (Object.hasOwn(state.values, key))
-      return validate(structuredClone(state.values[key]));
-    // 请求内容相同则沿用输出额度，不受 workflow 的恢复编号变化影响。
-    const budgetKey = digest([budget.key, messages]);
-    state.outputBudgets ??= {};
-    const previous = state.outputBudgets[budgetKey];
-    if (Number.isSafeInteger(previous) && previous <= MAX_STRUCTURED_OUTPUT)
-      tokens = requestOutput(Math.max(tokens, previous), budget);
-    let corrections = 0,
-      expansions = 0;
-    // 审稿与修订依据核对最多两次纠错；加上两次输出扩容，最多五次请求。
-    for (let attempt = 0; attempt < 3 + maxCorrections; attempt++) {
-      const response = await call(messages, tokens, label, true);
-      let rawKey = `raw:${key}:${attempt}`;
-      if (Object.hasOwn(state.fragments, rawKey))
-        rawKey += `:call-${state.calls}`;
-      state.fragments[rawKey] = response.text;
-      state.responseMeta ??= {};
-      state.responseMeta[rawKey] = {
-        finishReason: response.finishReason,
-        usage: response.usage,
-        model: response.model,
-        outputBudget: tokens,
-      };
-      await save();
-      if (response.finishReason === "length") {
-        const selected = fitWritingContext(messages, tokens, budget);
-        const next = largerStructuredOutput(selected.messages, tokens, budget);
-        if (expansions >= 2 || next <= tokens) {
-          const error = Error(
-            `“${label}”输出仍达到上限（本次预留${tokens}）。截断响应与草稿已保存，未作为完整结果采纳；请缩小本次处理范围后重试。`,
-          );
-          error.code = "OUTPUT_LIMIT";
-          error.outputBudget = tokens;
-          throw error;
-        }
-        appendCreationEvent(state, {
-          category: stageCategory(label),
-          status: "waiting",
-          title: `${label} · 输出截断，自动增加预算重试`,
-          details: {
-            原输出预算: tokens,
-            新输出预算: next,
-            扩容次数: expansions + 1,
-          },
-        });
-        tokens = next;
-        state.outputBudgets[budgetKey] = tokens;
-        expansions++;
-        await save();
-        continue;
-      }
-      let value;
-      try {
-        value = validate(parseStructured(response.text));
-      } catch (e) {
-        appendCreationEvent(state, {
-          category: stageCategory(label),
-          status: "failed",
-          title:
-            corrections >= maxCorrections
-              ? `${label} · 校验仍未通过`
-              : `${label} · 校验未通过，自动重试`,
-          details: {
-            原因: e.message,
-            尝试: attempt + 1,
-            纠错上限: maxCorrections,
-          },
-        });
-        await save();
-        if (corrections >= maxCorrections) {
-          const error =
-            e.name === "ZodError"
-              ? Error(
-                  `模型在“${label}”返回的数据不符合要求：${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("；")}。任务进度已保留，可恢复重试。`,
-                )
-              : e;
-          error.code = "MODEL_VALIDATION";
-          throw error;
-        }
-        messages = structuredRetryMessages(
-          messages,
-          response.text,
-          e,
-          tokens,
-          budget,
-        );
-        corrections++;
-        continue;
-      }
-      state.values[key] = value;
-      appendCreationEvent(state, {
-        category: stageCategory(label),
-        status: "success",
-        title: `${label} · 结果校验通过`,
-      });
-      await save();
-      signal.throwIfAborted();
-      return value;
-    }
-  }
+  const ask = createStructuredAsker({ state, budget, call, save, signal });
   try {
     const req = state.request;
     if (req.mode === "memory") {

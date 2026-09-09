@@ -91,11 +91,18 @@ test("证据不足的肯定推断有独立类别，必须提供材料和结论�
     () => validateFindings({ issues: [{ ...issue, evidence: [b] }] }, doc),
     /两处/,
   );
-  assert.throws(
-    () =>
-      validateFindings({ issues: [{ ...issue, searchedSources: [] }] }, doc),
-    /全部已提供来源/,
+  const recorded = validateFindings(
+    { issues: [{ ...issue, searchedSources: [] }] },
+    doc,
   );
+  assert.deepEqual(recorded.suppliedScope.sources, [
+    {
+      sourceId: "scene:1",
+      sourceHash: doc.sources[0].hash,
+      paragraphs: [1, 2],
+    },
+  ]);
+  assert.match(recorded.suppliedScope.policy, /不证明模型逐项检查/);
 });
 
 test("专项已要求裁定的实质疑点不能被普通疑点分类放行，未知信息仍可保留", async () => {

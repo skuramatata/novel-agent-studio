@@ -248,7 +248,7 @@ test("审稿连续出现JSON语法错误和索引伪地址时有限纠错，不�
   );
 });
 
-test("三次审稿仍返回伪地址时保存失败，恢复沿用场景且不采纳无效结果", async (t) => {
+test("三次审稿仍返回伪地址时保存失败，重复恢复不刷新预算且不采纳无效结果", async (t) => {
   const f = await setup(1200),
     normal = responder();
   t.after(() => rm(f.dir, { recursive: true, force: true }));
@@ -287,23 +287,16 @@ test("三次审稿仍返回伪地址时保存失败，恢复沿用场景且不�
   const saved = await f.checkpoint.read();
   assert.equal(saved.status, "retryable");
   assert.ok(!saved.paragraphReview.cycle.continuityReview);
-  const resumed = await f.checkpoint.begin(f.p, { resume: true }, config);
-  await runChapterAgent(
-    f.p,
-    config,
-    new AbortController().signal,
-    () => {},
-    f.checkpoint,
-    resumed,
-    async (url, init) => {
-      assert.ok(
-        !JSON.parse(init.body).messages[0].content.includes("仅写当前场景"),
-      );
-      return normal(url, init);
-    },
+  await assert.rejects(
+    f.checkpoint.begin(f.p, { resume: true }, config),
+    /纠错预算已用尽/,
   );
-  assert.equal(resumed.status, "ready");
-  assert.equal(resumed.values["final-scene:0"], saved.values["final-scene:0"]);
+  assert.equal(reviewCalls, 3);
+  assert.equal(saved.reviewWorkflow.failure.kind, "protocol_exhausted");
+  assert.equal(
+    (await f.checkpoint.read()).values["final-scene:0"],
+    saved.values["final-scene:0"],
+  );
 });
 test("审稿截断后恢复编号变化仍沿用13000预算，不重写已存场景", async (t) => {
   const f = await setup(1200),
@@ -529,7 +522,7 @@ test("过长规划失败响应保存在检查点，纠错只重带任务材料�
     assert.equal(attempts, 2);
     assert.equal(result.proposal.chapters[0].content.length, 1200);
     const saved = await f.checkpoint.read();
-    assert.equal(saved.fragments["raw:scene-plan:0"], invalid);
+    assert.ok(Object.values(saved.fragments).includes(invalid));
     assert.equal(saved.tokenBudget.version, "o200k-base-v1");
     assert.equal(saved.tokenBudget.factor, 1.25);
   } finally {
@@ -841,6 +834,10 @@ test("旧任务的记忆编号失败后恢复只重做记忆，不重写场景�
     const callsBefore = otherCalls;
     const saved = await f.checkpoint.read();
     const text = saved.values["final-scene:0"];
+    // 旧版本没有持久化结构化步骤；迁移后仅为未完成步骤建立一次新协议预算。
+    delete saved.structuredSteps;
+    delete saved.structuredFailure;
+    await f.checkpoint.write(saved);
     invalid = false;
     const state = await f.checkpoint.begin(f.p, { resume: true }, config);
     const result = await runChapterAgent(

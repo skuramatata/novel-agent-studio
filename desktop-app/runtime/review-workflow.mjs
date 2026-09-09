@@ -1,4 +1,5 @@
 import { digest } from "./memory.mjs";
+import { blockedStructuredRecovery } from "./structured-step.mjs";
 
 const labels = {
   review: "核对审稿发现",
@@ -10,6 +11,8 @@ const labels = {
   completed: "审稿完成",
 };
 const failureSummary = {
+  protocol_exhausted:
+    "同一输入的纠错预算已用尽，已停止请求模型。草稿和诊断已保存，需修正输入或处理协议后继续。",
   invalid_result: "模型返回的结论仍不完整或未通过校验，可以从本步骤重试。",
   repeat_finding: "本轮重复提出已处理的问题，但没有新证据，需要重新审稿。",
   repair_limit: "本轮修订尚未通过复核，原稿和作者取舍已保存，可以继续修订。",
@@ -417,9 +420,11 @@ export async function reviewStep(state, phase, save, run) {
         ? error
         : new ReviewRetryableError(
             phase,
-            error.code === "MODEL_VALIDATION" || error.name === "ZodError"
-              ? "invalid_result"
-              : "execution",
+            error.code === "STRUCTURED_RECOVERY_EXHAUSTED"
+              ? "protocol_exhausted"
+              : error.code === "MODEL_VALIDATION" || error.name === "ZodError"
+                ? "invalid_result"
+                : "execution",
             error.message,
           );
     w.failure = {
@@ -482,13 +487,16 @@ export function finishReview(state) {
 }
 export function addRecoveryMessage(state) {
   const w = reviewWorkflow(state);
+  const continuation = blockedStructuredRecovery(state)
+    ? "该输入的纠错预算已用尽，已停止请求模型。修正输入或处理协议后才能继续。"
+    : "点击“恢复上次任务”将继续这一步。";
   const id = `review-recovery-${state.id}-${w.retry}-${w.phase}`;
   state.reviewConversation ??= [];
   if (!state.reviewConversation.some((m) => m.id === id))
     state.reviewConversation.push({
       id,
       role: "assistant",
-      text: `任务停在“${labels[w.phase] || "审稿"}”。${w.failure?.detail ? `原因：${w.failure.detail}\n\n` : ""}草稿和已回答的情节取舍已保存，无需重新回答。点击“恢复上次任务”将继续这一步。`,
+      text: `任务停在“${labels[w.phase] || "审稿"}”。${w.failure?.detail ? `原因：${w.failure.detail}\n\n` : ""}草稿和已回答的情节取舍已保存，无需重新回答。${continuation}`,
     });
 }
 /** IPC 与前端使用同一份状态投影；未答问题优先于旧版错误状态。 */
@@ -510,6 +518,7 @@ export function reviewTaskState(state, active = false) {
     review: unanswered ? { ...pending, answers } : null,
     resumable:
       !active &&
+      !blockedStructuredRecovery(state) &&
       !unanswered &&
       [
         "retryable",
