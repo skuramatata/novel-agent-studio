@@ -318,17 +318,49 @@ export function localReviewDocument(
   doc,
   issues,
   constraints = [],
-  { profile, output = 5500, stage = "grounding" } = {},
+  { profile, output = 5500, stage = "grounding", messagesFor } = {},
 ) {
   const rows = rowsOf(doc),
     required = pinnedRows(doc, [issues, constraints]);
-  // 原文地址和作者事实是必需材料；邻段保证指代/时间关系，其他段落按问题内容回查。
+  // 预算以最终发送的字段和工作流指令为准，不重复扣除本地问题快照里的引文。
+  const limit = stageInputLimit(profile, requestOutput(output, profile), stage);
+  const request =
+    messagesFor ||
+    ((view) => [
+      {
+        role: "user",
+        content: JSON.stringify({
+          document: modelDocument(view),
+          issues,
+          constraints,
+        }),
+      },
+    ]);
   const selected = new Set(required);
+  const size = () => estimatedTokens(request(project(doc, selected)), profile);
+  if (size() > limit)
+    throw Object.assign(
+      Error(
+        `本组问题的必需原文与指令超过局部${stage === "patch" ? "修订" : "核对"}预算：输入估算${size()}，本阶段上限${limit}。草稿、证据与作者裁定已保留。`,
+      ),
+      {
+        code: "CONTEXT_BUDGET",
+        inputEstimate: size(),
+        limit,
+        issueIds: issues.map((i) => i.id),
+      },
+    );
+  const include = (rowId) => {
+    if (selected.has(rowId)) return;
+    selected.add(rowId);
+    if (size() > limit) selected.delete(rowId);
+  };
+  // 邻段优先回查，但不能挤占明确引用与作者事实；没提供的段落不算已检查。
   for (const row of rows)
     if (required.has(row.id)) {
       for (const p of row.source.paragraphs)
         if (Math.abs(p.paragraph - row.row.paragraph) <= 1)
-          selected.add(id(row.source.sourceId, p.paragraph));
+          include(id(row.source.sourceId, p.paragraph));
     }
   const query = terms(JSON.stringify(issues));
   const ranked = rows
@@ -338,35 +370,9 @@ export function localReviewDocument(
       score: [...terms(r.row.text)].filter((t) => query.has(t)).length,
     }))
     .sort((a, b) => b.score - a.score);
-  // 为任务指令、问题、补丁及格式纠错保留空间。必需证据不静默裁剪。
-  const limit = Math.max(
-    1000,
-    stageInputLimit(profile, requestOutput(output, profile), stage) -
-      estimatedTokens(
-        [{ role: "user", content: JSON.stringify([issues, constraints]) }],
-        profile,
-      ) -
-      2000,
-  );
-  const size = () =>
-    estimatedTokens(
-      [
-        {
-          role: "user",
-          content: JSON.stringify(modelDocument(project(doc, selected))),
-        },
-      ],
-      profile,
-    );
-  if (size() > limit)
-    throw Object.assign(
-      Error("本组问题的必要原文超过局部修订预算，需要进一步拆分问题。"),
-      { code: "CONTEXT_BUDGET" },
-    );
   for (const row of ranked) {
     if (!row.score) continue;
-    selected.add(row.id);
-    if (size() > limit) selected.delete(row.id);
+    include(row.id);
   }
   return project(doc, selected);
 }
@@ -420,27 +426,51 @@ export async function runLocalTasks({
 }) {
   const groups = profile ? issueGroups(issues) : [issues];
   const results = [];
-  const execute = async (group) => {
+  const tasks = [];
+  const prepare = (group) => {
     let view, messages;
+    const request = (view) => {
+      const messages = messagesFor(view, group);
+      return contract ? workflowMessages(messages, contract) : messages;
+    };
     try {
       view = profile
         ? localReviewDocument(doc, group, constraints, {
             profile,
             output,
             stage,
+            messagesFor: request,
           })
         : doc;
-      messages = messagesFor(view, group);
-      if (contract) messages = workflowMessages(messages, contract);
+      messages = request(view);
       ensureBudget(messages, requestOutput(output, profile), profile);
     } catch (error) {
-      const smaller = issueGroups(group, 1);
-      if (error.code === "CONTEXT_BUDGET" && smaller.length > 1) {
-        for (const part of smaller) await execute(part);
+      if (error.code !== "CONTEXT_BUDGET") throw error;
+      let smaller = issueGroups(group, 1);
+      // 核对与复核逐项产出决定，可以拆开共用段落的问题；补丁仍按关联段落原子生成。
+      if (
+        smaller.length === 1 &&
+        group.length > 1 &&
+        ["grounding", "verify", "arbitrate"].includes(stage)
+      ) {
+        const middle = Math.ceil(group.length / 2);
+        smaller = [group.slice(0, middle), group.slice(middle)];
+      }
+      if (smaller.length > 1) {
+        for (const part of smaller) prepare(part);
         return;
       }
+      error.message +=
+        stage === "patch" && group.length > 1
+          ? `关联问题（${group.map((i) => i.id).join("、")}）共用修改段落，不能生成互相覆盖的独立补丁；需缩小本次修订范围。`
+          : `问题（${group.map((i) => i.id).join("、")}）已无法继续拆批，需缩小该问题的处理范围。`;
       throw error;
     }
+    tasks.push({ group, view, messages });
+  };
+  // 先确认所有批次可执行，避免前几组已请求后才发现后组确定超限。
+  for (const group of groups) prepare(group);
+  for (const { group, view, messages } of tasks) {
     const validateResult = (value) => {
       const failures = [];
       let result;
@@ -465,13 +495,12 @@ export async function runLocalTasks({
         return value;
       },
       requestOutput(output, profile),
-      groups.length > 1
-        ? `${label} · 问题组 ${results.length + 1}/${groups.length}`
+      tasks.length > 1
+        ? `${label} · 问题组 ${results.length + 1}/${tasks.length}`
         : label,
       { maxCorrections, contract },
     );
     results.push(validateResult(raw));
-  };
-  for (const group of groups) await execute(group);
+  }
   return merge(results);
 }
