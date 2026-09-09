@@ -62,6 +62,7 @@ export function modelFindings(issues) {
             ...reference(t),
             quote: t.quote,
             fix: t.fix,
+            ...(t.operation ? { operation: t.operation } : {}),
           })),
         }
       : {}),

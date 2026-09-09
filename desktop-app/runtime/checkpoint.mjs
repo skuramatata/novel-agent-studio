@@ -2,7 +2,11 @@ import {
   submitReviewDecision,
   isReviewDecisionReplay,
 } from "./review-resolution.mjs";
-import { reviewTaskState, retryReview } from "./review-workflow.mjs";
+import {
+  reviewTaskState,
+  retryReview,
+  restoreRepeatedAuthorQuestions,
+} from "./review-workflow.mjs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { digest } from "./memory.mjs";
@@ -122,6 +126,7 @@ export class Checkpoint {
         old.version = WORKFLOW_VERSION;
       }
       // 旧版可能在问答存盘后记为 failed；以未回答的问题为准恢复等待状态。
+      if (!req.decision) restoreRepeatedAuthorQuestions(old);
       old.status = reviewTaskState(old).status;
       if (req.decision && !submitReviewDecision(old, req.decision)) {
         old.status = "awaiting_input";

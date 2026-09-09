@@ -22,6 +22,7 @@ import {
   authorConstraints,
   finishReview,
   ReviewRetryableError,
+  applyAuthorDecisions,
 } from "./review-workflow.mjs";
 import { digest } from "./memory.mjs";
 import { countWords } from "./writing.mjs";
@@ -413,7 +414,31 @@ export function applyParagraphPatch(scenes, doc, findings, value) {
         !change.before.includes(target.quote)
       )
         throw Error("修订计划的原文锚点已过期，不能应用。");
-      if (change.replacement.includes(target.quote))
+      if (["insert_before", "insert_after"].includes(target.operation)) {
+        const at = change.before.indexOf(target.quote);
+        if (change.before.indexOf(target.quote, at + 1) !== -1)
+          throw new RepairScopeError(
+            "补写锚点在段内不唯一，请补充定位上下文。",
+            [target],
+          );
+        const boundary =
+          at + (target.operation === "insert_after" ? target.quote.length : 0);
+        const prefix = change.before.slice(0, boundary),
+          suffix = change.before.slice(boundary);
+        const added = change.replacement.slice(
+          prefix.length,
+          change.replacement.length - suffix.length,
+        );
+        if (
+          !change.replacement.startsWith(prefix) ||
+          !change.replacement.endsWith(suffix) ||
+          !/[\p{L}\p{N}]/u.test(added)
+        )
+          throw new RepairScopeError(
+            `补写必须保留原段且在指定锚点${target.operation === "insert_after" ? "后" : "前"}增加实际内容：${target.sourceId}第${target.paragraph}段。`,
+            [target],
+          );
+      } else if (change.replacement.includes(target.quote))
         throw new RepairScopeError(
           `原错误片段仍未修改：${target.sourceId}第${target.paragraph}段“${target.quote}”。`,
           [target],
@@ -783,7 +808,11 @@ export async function reviewAndPatch({
         });
         if (cycle.continuityReview)
           value = mergeContinuityReview(cycle.continuityReview, value);
-        value.issues = trackFindings(state, value.issues, doc.version);
+        value.issues = trackFindings(
+          state,
+          applyAuthorDecisions(state, value.issues, doc),
+          doc.version,
+        );
         cycle.review = value;
         return value;
       }));
@@ -808,10 +837,21 @@ export async function reviewAndPatch({
           round,
         }),
       ));
+    problems = applyAuthorDecisions(state, problems, doc);
+    const retained = problems.filter((i) => i.authorRetained);
+    markIssues(state, retained, "closed", "作者已确认保留当前断言");
+    review.issues = review.issues.map(
+      (issue) => retained.find((i) => i.id === issue.id) || issue,
+    );
+    problems = problems.filter((i) => !i.authorRetained);
     cycle.problems = problems;
     await save();
     let rejection = cycle.scopeFeedback || cycle.rejection;
     async function loadPlan() {
+      if (!cycle.problems.length) {
+        problems = [];
+        return;
+      }
       if (
         cycle.repairPlan?.version === REPAIR_PLAN_VERSION &&
         cycle.repairPlan.documentVersion === doc.version
@@ -938,7 +978,7 @@ export async function reviewAndPatch({
               messagesFor: (view, group) => [
                 {
                   role: "system",
-                  content: `你是小说段落修订编辑。只能替换问题target指定的段落；若有allowedTargets，可同时修订其中直接冲突的段落，其余正文由程序保留。preserve是必须保留的有来源事实。remove_unsupported只能删去或改写无出处断言，禁止临时添加对白、过去事件、人物行动或知情来圆说。authorInstruction是作者明确的取舍，允许按其指定改变冲突事实；除此以外仍禁止编造。保留有效细节与语气，不为字数重新写整个场景。若不能在范围内解决，不伪造解决结果。repairTargets是独立核对后的实际修订清单，必须覆盖每个目标并改掉其quote所指的错误，不能只改其他句子或漏改相关段。每个replacement仅一个段落，可以为空以删除冗余段落。只输出JSON：{"baseVersion":"所给版本","replacements":[{"sourceId":"scene:1","paragraph":1,"issueIds":["所给问题ID"],"replacement":"这一段完整的新文字"}]}`,
+                  content: `你是小说段落修订编辑。只能替换问题target指定的段落；若有allowedTargets，可同时修订其中直接冲突的段落，其余正文由程序保留。preserve是必须保留的有来源事实。remove_unsupported只能删去或改写无出处断言，禁止临时添加对白、过去事件、人物行动或知情来圆说。authorInstruction是作者明确的取舍，允许按其指定改变冲突事实；除此以外仍禁止编造。保留有效细节与语气，不为字数重新写整个场景。若不能在范围内解决，不伪造解决结果。repairTargets是独立核对后的实际修订清单。operation=replace必须改掉quote所指的错误；operation=insert_before/insert_after必须保留原段，只在quote锚点前/后插入所需内容，不能为了补写而改掉正确原句。必须覆盖每个目标，不能只改其他句子或漏改相关段。每个replacement仅一个段落，可以为空以删除冗余段落。只输出JSON：{"baseVersion":"所给版本","replacements":[{"sourceId":"scene:1","paragraph":1,"issueIds":["所给问题ID"],"replacement":"这一段完整的新文字"}]}`,
                 },
                 {
                   role: "user",
@@ -1013,7 +1053,7 @@ export async function reviewAndPatch({
           messagesFor: (view, group) => [
             {
               role: "system",
-              content: `你是独立补丁复核员，只检查补丁及其影响，不重写正文。authorInstruction是作者已授权的事实取舍，不应把该取舍本身当作无依据新增；仍检查作者未授权的新增。必须逐一核对每个repairTargets指定的原错误表述是否确实消除，不能只看到一个相关段落改了就宣称整个问题解决。逐项确认原问题已解决、preserve事实没有被改掉、没有新增无出处的往事/对白/行动/知情、与同章前后文及提供的历史证据兼容。任何一项不确定或失败都填false，并给出具体原因。必须引用修改后document中可定位的证据地址。resolution=remove_unsupported时不能靠补造前情让断言成立。只输出JSON：{"checks":[{"issueId":"问题ID","resolved":true,"preservedFacts":true,"noUnsupportedAdditions":true,"downstreamConsistent":true,"evidence":[{"sourceId":"scene:1","paragraph":1}],"explanation":"根据哪些实际段落判断"}]}`,
+              content: `你是独立补丁复核员，只检查补丁及其影响，不重写正文。authorInstruction是作者已授权的事实取舍，不应把该取舍本身当作无依据新增；仍检查作者未授权的新增。必须逐一核对repairTargets：replace检查原错误是否消除，insert_before/insert_after检查补充内容是否落实且原文保留，不能只看到一个相关段落改了就宣称整个问题解决。逐项确认原问题已解决、preserve事实没有被改掉、没有新增无出处的往事/对白/行动/知情、与同章前后文及提供的历史证据兼容。任何一项不确定或失败都填false，并给出具体原因。必须引用修改后document中可定位的证据地址。resolution=remove_unsupported时不能靠补造前情让断言成立。只输出JSON：{"checks":[{"issueId":"问题ID","resolved":true,"preservedFacts":true,"noUnsupportedAdditions":true,"downstreamConsistent":true,"evidence":[{"sourceId":"scene:1","paragraph":1}],"explanation":"根据哪些实际段落判断"}]}`,
             },
             {
               role: "user",

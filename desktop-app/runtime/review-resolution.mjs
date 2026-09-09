@@ -216,7 +216,12 @@ export async function resolveReviewProblems({
         fix: "按作者选择统一冲突及直接相关段落，保留其他情节。",
       };
     });
-    const resolved = [...(pending.automatic || []), ...answered];
+    rememberDecisions(state, pending.id, answered);
+    const resolved = reuseAuthorDecisions(
+      state,
+      [...(pending.automatic || []), ...answered],
+      doc,
+    );
     // 固定决策缓存保证中断恢复不重新请求作者，也不重复增加修订预算。
     state.paragraphReview.authorResolutions ??= {};
     state.paragraphReview.authorResolutions[doc.version] = resolved;
@@ -230,14 +235,26 @@ export async function resolveReviewProblems({
       choices: decision.choices,
       issues: answered,
     });
-    rememberDecisions(state, pending.id, answered);
     markIssues(state, answered, "decided", "作者已经回答");
     delete state.pendingReview;
     await save();
     return resolved;
   }
-  if (state.paragraphReview.authorResolutions?.[doc.version])
-    return state.paragraphReview.authorResolutions[doc.version];
+  const cached = state.paragraphReview.authorResolutions?.[doc.version];
+  if (cached) {
+    // 缓存只恢复当前问题的作者答复，不复活本轮已经驳回的其他问题。
+    problems = problems.map(
+      (issue) =>
+        cached.find(
+          (old) =>
+            old.id === issue.id &&
+            old.kind === issue.kind &&
+            old.target.sourceId === issue.target.sourceId &&
+            old.target.quote === issue.target.quote &&
+            digest(old.evidence) === digest(issue.evidence),
+        ) || issue,
+    );
+  }
   problems = reuseAuthorDecisions(state, problems, doc);
   const uncertain = problems.filter(
     (i) => i.resolution === "needs_confirmation",

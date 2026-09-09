@@ -102,7 +102,10 @@ function registerFindings(state, findings, documentVersion) {
     used.add(item.id);
     const occurrence = digest([documentVersion, sig]);
     if (!item.occurrences.includes(occurrence)) {
-      if (["verified", "closed"].includes(item.status)) {
+      if (
+        ["verified", "closed"].includes(item.status) &&
+        !finding.authorRetained
+      ) {
         if (item.signatures.includes(sig))
           throw new ReviewRetryableError(
             "review",
@@ -125,7 +128,11 @@ function registerFindings(state, findings, documentVersion) {
         evidence: structuredClone(finding.evidence),
         explanation: finding.explanation,
       });
-      item.status = finding.blocking ? "open" : "advisory";
+      item.status = finding.authorRetained
+        ? "closed"
+        : finding.blocking
+          ? "open"
+          : "advisory";
     }
     item.latest = structuredClone(finding);
     item.documentVersion = documentVersion;
@@ -181,6 +188,7 @@ export function rememberDecisions(state, pendingId, issues) {
       id,
       ledgerId: i.ledgerId,
       action: i.resolution,
+      kind: i.kind,
       instruction: i.authorInstruction,
       facts: (i.preserve || []).map((r) => ({
         sourceId: r.sourceId,
@@ -223,16 +231,20 @@ export function reuseAuthorDecisions(state, problems, doc) {
   return problems.map((i) => {
     const c = [...w.constraints]
       .reverse()
-      .find(
-        (c) =>
-          c.issueSignature === signature(i) ||
-          (c.ledgerId && c.ledgerId === i.ledgerId),
-      );
+      .find((c) => matchesAuthorDecision(c, i));
     if (!c) return i;
     return {
       ...i,
-      resolution: "author_direction",
-      preserve: [],
+      resolution: c.action,
+      preserve: authorConstraints(state, doc)
+        .find((a) => a.id === c.id)
+        .facts.flatMap((f) => {
+          if (!f.currentReference) return [];
+          const source = doc.sources.find((s) => s.sourceId === f.sourceId);
+          return [
+            { ...f.currentReference, quote: f.quote, sourceHash: source.hash },
+          ];
+        }),
       authorInstruction: c.instruction,
       authorConstraintId: c.id,
       allowedTargets: [i.target, ...i.evidence].filter((r) =>
@@ -240,6 +252,112 @@ export function reuseAuthorDecisions(state, problems, doc) {
       ),
     };
   });
+}
+
+function matchesAuthorDecision(constraint, issue) {
+  if (constraint.issueSignature === signature(issue)) return true;
+  // 稳定编号只能辅助关联，不能把同段后来发现的另一个问题当作已经回答。
+  return (
+    constraint.kind === issue.kind &&
+    constraint.ledgerId &&
+    constraint.ledgerId === issue.ledgerId &&
+    constraint.target.sourceId === issue.target.sourceId &&
+    constraint.target.quote === issue.target.quote &&
+    constraint.action === "preserve_evidence" &&
+    constraint.facts.some((fact) =>
+      issue.evidence.some(
+        (ref) => ref.sourceId === fact.sourceId && ref.quote === fact.quote,
+      ),
+    )
+  );
+}
+
+// 作者针对同一断言选定当前原文后，缺少前情/推断类发现已经得到取舍。
+// 只处理稳定问题身份、相同目标原文与仍可定位的保留事实，不按段号批量放行。
+export function applyAuthorDecisions(state, problems, doc) {
+  return reuseAuthorDecisions(state, problems, doc).map((issue) => {
+    const constraint = reviewWorkflow(state).constraints.find(
+      (c) => c.id === issue.authorConstraintId,
+    );
+    if (
+      !constraint ||
+      constraint.action !== "preserve_evidence" ||
+      !["missing_history", "unsupported_inference"].includes(issue.kind) ||
+      constraint.target.sourceId !== issue.target.sourceId ||
+      constraint.target.quote !== issue.target.quote ||
+      !issue.preserve.some(
+        (r) =>
+          r.sourceId === issue.target.sourceId &&
+          r.paragraph === issue.target.paragraph &&
+          issue.target.quote.includes(r.quote),
+      )
+    )
+      return issue;
+    return {
+      ...issue,
+      blocking: false,
+      authorRetained: true,
+      fix: "作者已确认保留此处原文；不再以同一处缺少前情为由重问或强制修改。",
+    };
+  });
+}
+
+function repeatedAuthorAnswers(state) {
+  const pending = state.pendingReview;
+  if (
+    !pending?.issues.length ||
+    state.status === "completed" ||
+    state.paragraphReview?.cycle?.documentVersion !== pending.documentVersion
+  )
+    return null;
+  const answers = state.reviewDecisions?.[pending.id]?.choices || [];
+  if (answers.length) return null;
+  const restored = pending.issues.map((issue) => {
+    const c = [...(state.reviewWorkflow?.constraints || [])]
+      .reverse()
+      .find(
+        (c) =>
+          matchesAuthorDecision(c, issue) &&
+          c.target.sourceId === issue.target.sourceId &&
+          c.target.sourceHash &&
+          c.target.sourceHash === issue.target.sourceHash &&
+          c.target.quote === issue.target.quote,
+      );
+    if (!c) return null;
+    return {
+      ...issue,
+      resolution: c.action,
+      authorInstruction: c.instruction,
+      authorConstraintId: c.id,
+      preserve: c.facts.flatMap((f) => {
+        const ref = [c.target, ...c.evidence].find(
+          (r) => r.sourceId === f.sourceId && r.quote === f.quote,
+        );
+        return ref ? [{ ...ref }] : [];
+      }),
+    };
+  });
+  return restored.some((i) => !i) ? null : restored;
+}
+
+// 旧版已经反复提问时，恢复已保存的答案，不伪造一次新的用户作答。
+export function restoreRepeatedAuthorQuestions(state) {
+  const pending = state.pendingReview,
+    restored = repeatedAuthorAnswers(state);
+  if (!restored) return false;
+  const problems = [...(pending.automatic || []), ...restored];
+  state.paragraphReview.cycle.problems = problems;
+  delete state.paragraphReview.cycle.repairPlan;
+  delete state.paragraphReview.cycle.patch;
+  delete state.pendingReview;
+  state.status = "retryable";
+  state.error = "";
+  reviewWorkflow(state).phase = "grounding";
+  event(state, "author_answers_reused", {
+    pendingId: pending.id,
+    issues: restored.map((i) => i.id),
+  });
+  return true;
 }
 
 export class ReviewRetryableError extends Error {
@@ -347,12 +465,14 @@ export function addRecoveryMessage(state) {
 /** IPC 与前端使用同一份状态投影；未答问题优先于旧版错误状态。 */
 export function reviewTaskState(state, active = false) {
   const pending = state.pendingReview;
+  const repeatAnswered = !!repeatedAuthorAnswers(state);
   const answers = state.reviewDecisions?.[pending?.id]?.choices || [];
-  const unanswered = pending?.issues.some(
-    (i) => !answers.some((a) => a.issueId === i.id),
-  );
-  const status =
-    unanswered && state.status !== "completed"
+  const unanswered =
+    !repeatAnswered &&
+    pending?.issues.some((i) => !answers.some((a) => a.issueId === i.id));
+  const status = repeatAnswered
+    ? "retryable"
+    : unanswered && state.status !== "completed"
       ? "awaiting_input"
       : state.status;
   const w = state.reviewWorkflow;
@@ -372,8 +492,10 @@ export function reviewTaskState(state, active = false) {
       ].includes(status),
     reviewProgress: w
       ? {
-          phase: w.phase,
-          label: labels[w.phase],
+          phase: repeatAnswered ? "grounding" : w.phase,
+          label: repeatAnswered
+            ? "已复用作者裁定，可继续任务"
+            : labels[w.phase],
           failure: w.failure
             ? {
                 kind: w.failure.kind,
