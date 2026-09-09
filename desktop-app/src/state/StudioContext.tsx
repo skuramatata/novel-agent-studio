@@ -128,7 +128,21 @@ function useStudioState() {
         await list();
       });
     } catch (e) {
-      setError((e as Error).message);
+      const message = (e as Error).message;
+      // 生成失败前也可能已保存作者答复；先同步版本，再开放恢复入口。
+      await enqueue(async () => {
+        let syncError = "";
+        try {
+          if (id && current.current?.projectId === id) {
+            const latest = await bridge.load(id);
+            if (current.current?.projectId === id) put(latest);
+          }
+          await list();
+        } catch (e) {
+          syncError = `\n重新载入作品失败：${(e as Error).message}`;
+        }
+        setError(message + syncError);
+      });
       return false;
     } finally {
       running.current = false;
