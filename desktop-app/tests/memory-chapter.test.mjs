@@ -1639,3 +1639,68 @@ test("失败续写后的自行决定继承单章范围，走完整场景流程",
     await rm(f.dir, { recursive: true, force: true });
   }
 });
+
+test("GLM high正文截断续写也预留思考预算，恢复沿用已学用量", async (t) => {
+  const f = await setup(2400);
+  t.after(() => rm(f.dir, { recursive: true, force: true }));
+  const high = { ...config, model: "glm-5.3" };
+  const state = await f.checkpoint.begin(f.p, f.req, high);
+  const normal = responder();
+  let proseCalls = 0;
+  const budgets = [];
+  await assert.rejects(
+    runChapterAgent(
+      f.p,
+      high,
+      new AbortController().signal,
+      () => {},
+      f.checkpoint,
+      state,
+      async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (!body.messages[0].content.includes("仅写当前场景"))
+          return normal(url, init);
+        budgets.push(body.max_tokens);
+        if (++proseCalls === 2) throw Error("验证暂停");
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: { content: "他推开门，看见桌上的信。" },
+                finish_reason: "length",
+              },
+            ],
+            usage: { completion_tokens_details: { reasoning_tokens: 15000 } },
+          }),
+        );
+      },
+    ),
+    /验证暂停/,
+  );
+  assert.deepEqual(budgets, [18000, 24000]);
+  const saved = await f.checkpoint.read();
+  assert.equal(saved.tokenBudget.reasoningPeaks.prose, 15000);
+  assert(
+    Object.values(saved.fragments).some(
+      (v) => typeof v === "string" && v.includes("桌上的信"),
+    ),
+  );
+  const resumed = await f.checkpoint.begin(f.p, { resume: true }, high);
+  await assert.rejects(
+    runChapterAgent(
+      f.p,
+      high,
+      new AbortController().signal,
+      () => {},
+      f.checkpoint,
+      resumed,
+      async (_, init) => {
+        const body = JSON.parse(init.body);
+        assert.equal(body.max_tokens, 24000);
+        assert(body.messages.some((m) => m.content.includes("桌上的信")));
+        throw Error("验证恢复额度");
+      },
+    ),
+    /验证恢复额度/,
+  );
+});

@@ -82,9 +82,15 @@ export async function runChapterAgent(
   let callsThisRun = 0;
   const budget = createBudgetProfile(config, state.tokenBudget);
   state.tokenBudget = budget;
-  async function call(messages, tokens, label, partial = false) {
+  async function call(
+    messages,
+    tokens,
+    label,
+    partial = false,
+    structured = false,
+  ) {
     if (!partial) messages = proseWorkflowMessages(messages);
-    tokens = partial
+    tokens = structured
       ? requestOutput(tokens, budget)
       : initialOutput(tokens, budget, "prose");
     signal.throwIfAborted();
@@ -147,7 +153,7 @@ export async function runChapterAgent(
       await save();
       throw e;
     }
-    if (!partial) observeReasoning(budget, "prose", result.usage);
+    if (!structured) observeReasoning(budget, "prose", result.usage);
     state.usages.push(result.usage);
     observeTokenUsage(budget, messages, result.usage);
     appendCreationEvent(state, {
@@ -170,7 +176,15 @@ export async function runChapterAgent(
     signal.throwIfAborted();
     return result;
   }
-  const ask = createStructuredAsker({ state, budget, call, save, signal });
+  const ask = createStructuredAsker({
+    state,
+    budget,
+    save,
+    signal,
+    // 结构化步骤已计算总额度；正文的部分输出选项不影响思考预算。
+    call: (messages, tokens, label, partial) =>
+      call(messages, tokens, label, partial, true),
+  });
   try {
     const req = state.request;
     if (state.draftWork) {
@@ -694,7 +708,11 @@ export async function runChapterAgent(
           (response.text.includes("〈场景完成〉") ||
             countWords(text + next) >= lower);
         if (!next && !(ended && text))
-          throw Error("场景没有新增正文，已保存草稿。");
+          throw Error(
+            response.finishReason === "length"
+              ? "本次输出额度耗尽，尚未生成新增正文；已有草稿已保留，可恢复重试。"
+              : "场景没有新增正文，已保存草稿。",
+          );
         if (next && text.endsWith(next))
           throw Error("续写重复了已有结尾，已保留草稿，请检查后重试。");
         text +=
