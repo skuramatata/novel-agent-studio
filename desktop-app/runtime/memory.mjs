@@ -3,7 +3,10 @@ import { fitWritingContext } from "./context-budget.mjs";
 export { estimatedTokens, ensureBudget } from "./model-budget.mjs";
 import { createHash } from "node:crypto";
 import { continuityLedger } from "./continuity.mjs";
-import { CONTINUITY_MEMORY_RULES } from "./continuity-schema.mjs";
+import {
+  continuityRecordSchema,
+  CONTINUITY_MEMORY_RULES,
+} from "./continuity-schema.mjs";
 import { workflowContract } from "./workflow-skill.mjs";
 import { z } from "zod";
 import { selectMemoryRecords } from "./memory-selection.mjs";
@@ -14,35 +17,34 @@ import {
   MEMORY_RECORD_LIMIT,
   MEMORY_SUMMARY_LIMIT,
 } from "./memory-schema.mjs";
-const sourceMemorySchema = extractedMemorySchema.extend({
-  records: z
-    .array(
-      memoryRecordSchema
-        .omit({ quote: true })
-        .extend({ sourceId: z.number().int().positive() }),
-    )
-    .max(MEMORY_RECORD_LIMIT),
-});
-const extractionContract = workflowContract(
-  "memory_extract",
-  z.union([sourceMemorySchema, extractedMemorySchema]),
-  { displaySchema: sourceMemorySchema },
-);
-const compactSourceSchema = sourceMemorySchema.extend({
-  summary: z.string().min(1).max(400),
-  records: sourceMemorySchema.shape.records.max(8),
-});
-const compactExtractionContract = workflowContract(
-  "memory_extract",
-  z.union([
-    compactSourceSchema,
-    extractedMemorySchema.extend({
-      summary: z.string().min(1).max(400),
-      records: extractedMemorySchema.shape.records.max(8),
-    }),
-  ]),
-  { displaySchema: compactSourceSchema },
-);
+// 持久化旧记忆仍允许缺少 continuity；本轮抽取的必填要求由调用场景决定。
+export function memoryExtractionContract({
+  continuity = false,
+  compact = false,
+} = {}) {
+  const record = continuity
+    ? memoryRecordSchema.extend({ continuity: continuityRecordSchema })
+    : memoryRecordSchema;
+  const quoted = extractedMemorySchema.extend({
+    summary: z
+      .string()
+      .min(1)
+      .max(compact ? 400 : MEMORY_SUMMARY_LIMIT),
+    records: z.array(record).max(compact ? 8 : MEMORY_RECORD_LIMIT),
+  });
+  const source = quoted.extend({
+    records: z
+      .array(
+        record
+          .omit({ quote: true })
+          .extend({ sourceId: z.number().int().positive() }),
+      )
+      .max(compact ? 8 : MEMORY_RECORD_LIMIT),
+  });
+  return workflowContract("memory_extract", z.union([source, quoted]), {
+    displaySchema: source,
+  });
+}
 export const digest = (value) =>
   createHash("sha256")
     .update(typeof value === "string" ? value : JSON.stringify(value))
@@ -104,9 +106,12 @@ export function validateExtraction(value, source, { continuity = false } = {}) {
       }
     : value;
   const result = extractedMemorySchema.parse(resolved);
-  if (continuity && result.records.some((r) => !r.continuity))
+  const missing = result.records.flatMap((r, i) =>
+    r.continuity ? [] : [`records[${i}].continuity`],
+  );
+  if (continuity && missing.length)
     throw Error(
-      "每条记忆必须提供continuity，保留陈述性质、行动主体、物件变化与时间；未知字段填空串或null，不能补造。",
+      `缺少必填字段：${missing.join("、")}。每条记忆必须提供continuity对象，保留陈述性质、行动主体、物件变化与时间；对象内未知字段按字段表填空串或null，不能省略整个对象或补造事实。`,
     );
   for (const [index, r] of result.records.entries())
     if (!source.includes(r.quote))
@@ -121,6 +126,7 @@ export async function indexChapter(
   ask,
   { continuity = false, compact = false } = {},
 ) {
+  const contract = memoryExtractionContract({ continuity, compact });
   const recordLimit = compact ? 8 : MEMORY_RECORD_LIMIT;
   const summaryLimit = compact ? 400 : MEMORY_SUMMARY_LIMIT;
   const hash = digest(chapter.content);
@@ -146,8 +152,12 @@ export async function indexChapter(
         {
           role: "system",
           content:
-            `从提供的小说原文抽取有出处的记忆，只输出JSON。summary最多${summaryLimit}字符，只描述本段正文，不能把章纲当成已发生事件。records最多${recordLimit}条，选对后续情节有用的记录，不为凑数拆分。人物的谎言、猜测和传闻必须保留陈述性质；不知道的时间、知情人不要推断。kind只能填以下小写英文值之一：event（事件）、state（状态）、knowledge（知情）、thread（故事线进展）、foreshadow（伏笔）。epistemic只能填observed（原文陈述）、belief（人物信念）、rumor（传闻）、unknown（无法确定）。人物信念可用kind=knowledge、epistemic=belief，不能把belief填入kind。这里的observed也只是原文陈述，不证明叙述者可靠。每条记录必须选择支持该记录的 sources 中的一个 sourceId 整数编号，程序会回填原文引文，不要输出quote或抄写原文。text最多600字符，精简且仅描述该片段支持的事实；entities和knownBy各最多12项、每项最多80字符，storyTime最多160字符。格式：{"summary":"本段摘要","records":[{"kind":"event","text":"事件描述","entities":["人物或物件"],"storyTime":"未知","knownBy":[],"epistemic":"observed","sourceId":1}]}` +
-            (continuity ? "\n" + CONTINUITY_MEMORY_RULES : ""),
+            `从提供的小说原文抽取有出处的记忆，只输出JSON。summary最多${summaryLimit}字符，只描述本段正文，不能把章纲当成已发生事件。records最多${recordLimit}条，选对后续情节有用的记录，不为凑数拆分。人物的谎言、猜测和传闻必须保留陈述性质；不知道的时间、知情人不要推断。kind只能填以下小写英文值之一：event（事件）、state（状态）、knowledge（知情）、thread（故事线进展）、foreshadow（伏笔）。epistemic只能填observed（原文陈述）、belief（人物信念）、rumor（传闻）、unknown（无法确定）。人物信念可用kind=knowledge、epistemic=belief，不能把belief填入kind。这里的observed也只是原文陈述，不证明叙述者可靠。每条记录必须选择支持该记录的 sources 中的一个 sourceId 整数编号，程序会回填原文引文，不要输出quote或抄写原文。text最多600字符，精简且仅描述该片段支持的事实；entities和knownBy必须是数组，未知时填[]，不能填字符串；各最多12项、每项最多80字符，storyTime最多160字符。格式：{"summary":"本段摘要","records":[{"kind":"event","text":"事件描述","entities":["人物或物件"],"storyTime":"未知","knownBy":[],"epistemic":"observed","sourceId":1${continuity ? ',"continuity":{"assertion":"unknown","actor":"","action":"","object":"","before":"","after":"","evidenceForm":"unknown","time":null}' : ""}}]}` +
+            (continuity
+              ? "\n" +
+                CONTINUITY_MEMORY_RULES +
+                "\n实际输出每条records都必须包含完整continuity对象，包含伏笔与状态类记录。"
+              : ""),
         },
         {
           role: "user",
@@ -170,7 +180,7 @@ export async function indexChapter(
       continuity ? 6000 : 3500,
       `整理第 ${chapter.number} 章记忆 · ${part + 1}/${parts.length}`,
       {
-        contract: compact ? compactExtractionContract : extractionContract,
+        contract,
         ...(compact
           ? {
               reasoningEffort: "low",

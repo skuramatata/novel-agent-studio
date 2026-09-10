@@ -104,3 +104,67 @@ test("记忆low不继承high观测额度，其他模型与默认high不受影响
       { reasoningEffort: effort },
     );
 });
+
+test("连续性抽取契约必填，历史记忆仍兼容，诊断同时列出所有漏项", async () => {
+  const { memoryExtractionContract, validateExtraction } =
+    await import("../runtime/memory.mjs");
+  const record = {
+    kind: "event",
+    text: "拿信",
+    entities: [],
+    knownBy: [],
+    storyTime: "",
+    epistemic: "observed",
+    sourceId: 1,
+  };
+  const value = { summary: "摘要", records: [record, record] };
+  const strict = memoryExtractionContract({ continuity: true, compact: true });
+  assert.match(strict.fields, /continuity:/);
+  assert.doesNotMatch(strict.fields, /continuity\?:/);
+  assert.throws(() => strict.parse(value));
+  assert.doesNotThrow(() => memoryExtractionContract().parse(value));
+  assert.throws(
+    () => validateExtraction(value, "拿信", { continuity: true }),
+    /records\[0\].continuity.*records\[1\].continuity/,
+  );
+  const continuity = {
+    assertion: "unknown",
+    actor: "",
+    action: "",
+    object: "",
+    before: "",
+    after: "",
+    evidenceForm: "unknown",
+    time: null,
+  };
+  assert.doesNotThrow(() =>
+    strict.parse({ ...value, records: [{ ...record, continuity }] }),
+  );
+  assert.throws(() =>
+    strict.parse({
+      ...value,
+      records: [{ ...record, continuity, knownBy: "甲" }],
+    }),
+  );
+});
+
+test("仅旧连续性字段校验失败允许迁移一次", () => {
+  const step = {
+    contractId: "memory_extract",
+    memoryExtractionPolicy: "glm53-memory-low-1600-v1",
+    lastFailure: { kind: "validation", detail: "每条记忆必须提供continuity" },
+  };
+  assert(canMigrateMemoryExtraction(config, step));
+  assert(
+    !canMigrateMemoryExtraction(config, {
+      ...step,
+      memoryExtractionPolicy: MEMORY_EXTRACTION_POLICY,
+    }),
+  );
+  assert(
+    !canMigrateMemoryExtraction(config, {
+      ...step,
+      lastFailure: { kind: "validation", detail: "sourceId 无效" },
+    }),
+  );
+});
