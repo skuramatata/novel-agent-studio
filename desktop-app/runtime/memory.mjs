@@ -213,19 +213,25 @@ export function contextFor(
     .map((m) => Number(m[1]))
     .filter((n) => n !== target.number);
   const references = p.chapters.filter((c) => requested.includes(c.number));
+  const available = prior.filter((c) => c.content.trim());
+  const sourceHelp = available.length
+    ? `可引用：${available.map((c) => `第${c.number}章《${c.title}》`).join("、")}。请改为实际来源章号；若是人物背景往事，请去掉错误章号并说明背景事件。`
+    : "此前还没有已写正文。若是人物背景往事，请去掉引用章号，按人物设定或章纲描述事件。";
   if (requested.some((n) => !references.some((c) => c.number === n)))
-    throw Error("回忆引用的章节不存在，请明确事件来源。");
-  if (references.some((c) => c.number >= target.number || !c.content))
-    throw Error("历史引用必须指向此前已有正文的章节，不能将未来章纲作为事实。");
+    throw Error(
+      `引用的${requested
+        .filter((n) => !references.some((c) => c.number === n))
+        .map((n) => `第${n}章`)
+        .join("、")}不存在。${sourceHelp}`,
+    );
+  if (references.some((c) => c.number >= target.number || !c.content.trim()))
+    throw Error(
+      `正在写第${target.number}章；历史引用必须指向此前已有正文的章节，不能引用未来章或空白章。${sourceHelp}`,
+    );
   const query = instruction + " " + target.summary;
   const names = p.characters
     .filter((c) => query.includes(c.name))
     .map((c) => c.name);
-  const recall = /回忆|往事|当年|追忆|忆起/.test(query);
-  if (recall && !references.length)
-    throw Error(
-      "本章包含回忆，请在要求中写明来源（例如：回忆第12章交钥匙事件），避免混淆往事。",
-    );
   const {
     evidence,
     manifest,
@@ -276,7 +282,7 @@ export function contextFor(
       content: c.content,
     })),
     rules:
-      "章纲是计划，不是已发生事实。记录均为模型抽取，冲突以原文为依据并报告。区分过去知情、现在知情与当前允许揭示；未检索到不代表可以编造既有事实。",
+      "章纲是计划，不是已发生事实。记录均为模型抽取，冲突以原文为依据并报告。区分过去知情、现在知情与当前允许揭示；未检索到不代表可以编造既有事实。人物背景往事可依据已采纳的人物设定和当前章纲展开，不要求此前已写成正文；不得伪称前文已有该事件。关键冲突交由证据审查指出具体句子及处理建议。",
   };
   fitWritingContext(
     [

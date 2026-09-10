@@ -1,6 +1,19 @@
 // 简短继续指令只推进已采纳章纲中的下一空白章，不授权重写已有正文。
-export function continuationTask(project, instruction) {
-  if (!/^(?:继续(?:吧|写|生成)?|接着写)[。！!\s]*$/.test(instruction.trim()))
+export function continuationTask(
+  project,
+  instruction,
+  previousInstruction = "",
+) {
+  const delegated =
+    /^(?:你)?(?:自己决定|自行决定|自行处理|自动处理)(?:不行吗|可以吗|就行|吧)?[？?。！!\s]*$/.test(
+      instruction.trim(),
+    );
+  const scope = delegated ? previousInstruction : instruction;
+  if (
+    !/^(?:继续(?:吧|写|生成)?|接着写|(?:继续|接着)?(?:写|生成)?下一章)[。！!\s]*$/.test(
+      scope.trim(),
+    )
+  )
     return null;
   const chapter = [...project.chapters]
     .sort((a, b) => a.number - b.number)

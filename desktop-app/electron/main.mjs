@@ -513,6 +513,7 @@ async function executeGenerate(req, controller) {
           send,
           fetch,
           {
+            resolvedTask: generated.task,
             onLog: async (event) => {
               checkpointState.stage = event.title;
               if (typeof event.details?.调用次数 === "number")

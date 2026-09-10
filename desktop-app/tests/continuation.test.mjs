@@ -25,3 +25,17 @@ test("全部已写完时不把继续当作重写授权，具体修改请求交�
   assert.equal(continuationTask(p, "继续修改第一章"), null);
   assert.equal(continuationTask(p, "继续，把第一章改成3000字"), null);
 });
+
+test("下一章指令和有明确前次续写范围的自行决定只选一章", () => {
+  const p = project();
+  p.chapters[0].content = "已采纳正文";
+  for (const text of ["继续下一章", "下一章", "接着写下一章"]) {
+    assert.deepEqual(continuationTask(p, text).targetIds, ["b"]);
+  }
+  assert.deepEqual(
+    continuationTask(p, "你自己决定不行吗？", "继续下一章").targetIds,
+    ["b"],
+  );
+  assert.equal(continuationTask(p, "你自己决定不行吗？"), null);
+  assert.equal(continuationTask(p, "你自己决定不行吗？", "修改全篇"), null);
+});

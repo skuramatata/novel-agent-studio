@@ -20,6 +20,7 @@ import {
   draftVersion,
 } from "./revision-session.mjs";
 import { prepareDraftAction } from "./draft-actions.mjs";
+import { continuationTask } from "./continuation.mjs";
 export const WORKFLOW_VERSION = "chapter-memory-2";
 export function baseFingerprint(p) {
   return digest({
@@ -222,6 +223,18 @@ export class Checkpoint {
       retrievalVersion: 1,
       memoryContextVersion: 2,
       base,
+      // 仅继承同一作品状态下、尚未生成草稿的失败续写范围；不从旧聊天推断全篇修改。
+      previousContinuationInstruction:
+        old?.base === base &&
+        old.status === "failed" &&
+        !draftScenes(old).length &&
+        continuationTask(
+          p,
+          old.request.instruction,
+          old.previousContinuationInstruction,
+        )
+          ? old.previousContinuationInstruction || old.request.instruction
+          : "",
       wordTolerance: projectWordTolerance(p),
       request: {
         instruction: req.instruction,

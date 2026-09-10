@@ -49,7 +49,7 @@ export function ChapterGeneration({ chapter }: { chapter: Chapter }) {
       </div>
       <textarea
         aria-label="本章创作要求"
-        placeholder="补充本章要求；回忆请注明来源，如“回忆第12章交钥匙事件”。"
+        placeholder="补充本章要求；人物背景往事可直接描述，引用已写事件时可注明实际来源章节。"
         value={instruction}
         onChange={(e) => setInstruction(e.target.value)}
         rows={2}

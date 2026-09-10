@@ -264,13 +264,19 @@ async function runWritingTask(
     throw Error(`阶段“${name}”两次未通过：${last}`);
   }
   try {
-    const task = await ask(
-      "确定写作范围与字数",
-      taskMessages(project, instruction),
-      taskSchema,
-      (x) => resolveTask(project, x, instruction),
-      2000,
-    );
+    const task = options.resolvedTask
+      ? resolveTask(
+          project,
+          taskSchema.parse(options.resolvedTask),
+          instruction,
+        )
+      : await ask(
+          "确定写作范围与字数",
+          taskMessages(project, instruction),
+          taskSchema,
+          (x) => resolveTask(project, x, instruction),
+          2000,
+        );
     if (!["draft", "revise"].includes(task.mode)) {
       const proposal = await ask(
         "讨论或规划",

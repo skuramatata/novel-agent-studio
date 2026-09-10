@@ -795,3 +795,31 @@ test("恐怖缺口修订后仍未解决，不能返回可采纳候选", async ()
   );
   assert.equal(p.chapters[0].content, "原稿");
 });
+
+test("章节入口已识别为讨论时旧入口不再次识别或扩成六章写作", async () => {
+  const p = planned();
+  p.premise.chapterWords = 4500;
+  const seen = [];
+  const result = await runAgent(
+    p,
+    "你自己决定不行吗？",
+    config,
+    new AbortController().signal,
+    () => {},
+    fetchSequence([{ summary: "会在当前任务范围内处理。" }], seen),
+    {
+      resolvedTask: {
+        mode: "discuss",
+        targetIds: [],
+        totalWords: null,
+        chapterWords: null,
+        scopeEvidence: "你自己决定不行吗？",
+        explanation: "讨论当前处理办法",
+      },
+    },
+  );
+  assert.equal(seen.length, 1);
+  assert.ok(!seen[0].messages[0].content.includes("识别本次创作任务"));
+  assert.equal(result.proposal.summary, "会在当前任务范围内处理。");
+  assert.equal(result.proposal.chapters, undefined);
+});

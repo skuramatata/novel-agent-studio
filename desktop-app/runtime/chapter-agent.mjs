@@ -225,7 +225,13 @@ export async function runChapterAgent(
         signal,
       });
     let task;
-    const continuation = !req.chapterId && continuationTask(p, req.instruction);
+    const continuation =
+      !req.chapterId &&
+      continuationTask(
+        p,
+        req.instruction,
+        state.previousContinuationInstruction,
+      );
     if (continuation?.complete) {
       state.status = "ready";
       state.stage = "已有章节均已完成";
@@ -283,7 +289,8 @@ export async function runChapterAgent(
       // ask 会重新校验旧缓存；把归一后的目标写回，恢复不再沿用推算总字数。
       state.values["intent-v2"] = task;
       await save();
-      if (!["draft", "revise"].includes(task.mode)) return { legacy: true };
+      if (!["draft", "revise"].includes(task.mode))
+        return { legacy: true, task };
       if (
         !task.scopeEvidence.trim() ||
         !req.instruction.includes(task.scopeEvidence)
@@ -439,7 +446,7 @@ export async function runChapterAgent(
       [
         {
           role: "system",
-          content: `${WRITING_RULES}\n为当前章设计恰好${count}个连续场景。每个场景有行动、阻力、选择、后果，并遵守知情边界。只输出JSON：${JSON.stringify({ scenes: [sceneShape] })}。${continuity ? "每个场景必须填写time全部四项，按已知时间锚点推进，不得漏填。未定绝对日期时使用相对时间，不补造年份或历法；回忆分别标明事件时间和叙述时间。" : ""}不得复制尚未揭示的秘密。章纲只是计划；回忆必须依据原文，缺失关键依据应明确报告，不能补造过去对白。`,
+          content: `${WRITING_RULES}\n为当前章设计恰好${count}个连续场景。每个场景有行动、阻力、选择、后果，并遵守知情边界。只输出JSON：${JSON.stringify({ scenes: [sceneShape] })}。${continuity ? "每个场景必须填写time全部四项，按已知时间锚点推进，不得漏填。未定绝对日期时使用相对时间，不补造年份或历法；回忆分别标明事件时间和叙述时间。" : ""}不得复制尚未揭示的秘密。章纲只是计划。回顾已写事件须依据历史原文，不能补造过去对白；人物背景往事可以按已采纳章纲与人物设定展开，不要求此前已有正文。缺少关键依据且无法保守处理时报告具体句子、冲突依据与可执行取舍，不因出现“回忆、当年”就要求作者指定章节。`,
         },
         {
           role: "user",

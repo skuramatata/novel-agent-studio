@@ -676,7 +676,7 @@ test("length输出保存后续写，完整片段不丢失且不会被当成完�
     await rm(f.dir, { recursive: true, force: true });
   }
 });
-test("第58章引用第12章取回原文，其他章改稿不使本章记忆失效；未指定回忆来源拒绝猜测", () => {
+test("第58章引用第12章取回原文，其他章改稿不使本章记忆失效；背景往事不强制指定章节", () => {
   const p = planned();
   p.chapters = Array.from({ length: 58 }, (_, i) => ({
     id: `c${i + 1}`,
@@ -701,9 +701,8 @@ test("第58章引用第12章取回原文，其他章改稿不使本章记忆失�
   const ctx = contextFor(p, p.chapters[57], "回忆第12章交钥匙事件", [entry]);
   assert.equal(ctx.context.recallSources[0].content, c.content);
   assert.ok(!JSON.stringify(ctx.context).includes(p.plan.truth));
-  assert.throws(
-    () => contextFor(p, p.chapters[57], "回忆当年的事", [entry]),
-    /来源/,
+  assert.doesNotThrow(() =>
+    contextFor(p, p.chapters[57], "回忆当年的事", [entry]),
   );
   p.chapters[0].content = "改过的历史。";
   assert.equal(isCurrent(entry, p), true);
@@ -1571,5 +1570,72 @@ test("篇幅修订正常结束但漏标记仍保存结果并进入审稿，截�
     } finally {
       await rm(f.dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("首章背景往事与下一章章纲回忆不误拦截，错误章号给出真实来源", () => {
+  const p = planned();
+  p.chapters[0].summary = "回忆当年童年往事，依照人物设定展开。";
+  assert.doesNotThrow(() => contextFor(p, p.chapters[0], "继续下一章", []));
+  p.chapters[0].content = "姐姐在车站交出钥匙。";
+  p.chapters[1].summary = "回忆童年后继续调查。";
+  assert.doesNotThrow(() => contextFor(p, p.chapters[1], "继续下一章", []));
+  assert.throws(
+    () => contextFor(p, p.chapters[1], "回忆第12章交钥匙", []),
+    /第12章不存在。可引用：第1章/,
+  );
+  assert.throws(
+    () => contextFor(p, p.chapters[0], "回忆第2章", []),
+    /未来章或空白章/,
+  );
+  p.chapters[0].content = "   ";
+  assert.throws(
+    () => contextFor(p, p.chapters[1], "回忆第1章", []),
+    /此前还没有已写正文/,
+  );
+});
+
+test("失败续写后的自行决定继承单章范围，走完整场景流程", async () => {
+  const f = await setup(1200);
+  try {
+    f.p.premise.chapterWords = 1200;
+    f.p.chapters[0].summary = "回忆人物童年的往事，再继续调查。";
+    let state = await f.checkpoint.begin(
+      f.p,
+      { instruction: "继续下一章" },
+      config,
+    );
+    state.status = "failed";
+    state.error = "旧版回忆来源拦截";
+    await f.checkpoint.write(state);
+    state = await f.checkpoint.begin(
+      f.p,
+      { instruction: "你自己决定不行吗？" },
+      config,
+    );
+    assert.equal(state.previousContinuationInstruction, "继续下一章");
+    const normal = responder();
+    const result = await runChapterAgent(
+      f.p,
+      config,
+      new AbortController().signal,
+      () => {},
+      f.checkpoint,
+      state,
+      async (url, options) => {
+        const body = JSON.parse(options.body);
+        assert.ok(
+          !body.messages[0].content.includes("识别本次创作任务"),
+          "单章续写不再次让模型推算全篇范围",
+        );
+        return normal(url, options);
+      },
+    );
+    assert.equal(result.legacy, undefined);
+    assert.equal(result.proposal.chapters[0].content.length, 1200);
+    assert.deepEqual(state.values.intent.targetIds, [f.p.chapters[0].id]);
+    assert.equal(f.p.chapters[0].content, "");
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
   }
 });
