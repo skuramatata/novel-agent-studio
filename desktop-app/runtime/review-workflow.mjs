@@ -76,6 +76,26 @@ export function trackFindings(state, findings, documentVersion) {
     throw e;
   }
 }
+
+// 仅在专项与普通审稿全部完成后替换当前待办。未再次确认的旧项保留为
+// 历史记录，不宣称已修复；中断或单批结果不得清空其他问题。
+export function trackCompleteReview(state, findings, documentVersion) {
+  const current = trackFindings(state, findings, documentVersion);
+  const ids = new Set(current.map((i) => i.ledgerId));
+  for (const item of reviewWorkflow(state).issues)
+    if (
+      !ids.has(item.id) &&
+      ["open", "advisory", "awaiting_author"].includes(item.status)
+    ) {
+      item.status = "stale";
+      event(state, "issue_superseded", {
+        issueId: item.id,
+        documentVersion,
+        reason: "本轮完整审稿未再次确认，保留历史发现，不视为已修复",
+      });
+    }
+  return current;
+}
 function registerFindings(state, findings, documentVersion) {
   const w = reviewWorkflow(state);
   const used = new Set();
@@ -109,6 +129,8 @@ function registerFindings(state, findings, documentVersion) {
       w.issues.push(item);
     }
     used.add(item.id);
+    if (item.status === "stale")
+      item.status = finding.blocking ? "open" : "advisory";
     const occurrence = digest([documentVersion, sig]);
     if (!item.occurrences.includes(occurrence)) {
       if (

@@ -156,6 +156,16 @@ test("草稿操作反馈区分正文不变、版本恢复、等待回答和失�
     },
   };
   assert.match(draftFeedback(task).text, /本次正文没有变化/);
+  task.reviewProgress = {
+    issues: [
+      ...Array.from({ length: 25 }, () => ({ status: "open" })),
+      ...Array.from({ length: 8 }, () => ({ status: "advisory" })),
+    ],
+  };
+  task.status = "awaiting_instruction";
+  assert.match(draftFeedback(task).text, /25 项待核对，8 项可选建议/);
+  assert.match(draftFeedback(task).text, /当前没有待回答的情节选择/);
+  assert.doesNotMatch(draftFeedback(task).text, /33/);
   task.workspace.lastAction = { type: "restore", changed: true };
   assert.match(draftFeedback(task).text, /已恢复所选版本/);
   task.status = "awaiting_input";

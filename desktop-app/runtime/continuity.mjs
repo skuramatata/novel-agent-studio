@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { remapReviewChecks } from "./review-result.mjs";
+import { coalesceReviewFindings } from "./review-dedup.mjs";
 
 export const CONTINUITY_VERSION = 1;
 const hash = (value) =>
@@ -277,28 +278,17 @@ export const CONTINUITY_REVIEW_RULES = `本轮只执行时间、事实与证据�
 推理依据专项应明确角色实际持有什么材料，以及该材料能支持哪一步结论。没有原件、照片或明确摹写过程，却据普通誊抄件断言原签名的用笔习惯时，引用材料形态和结论两处，归unsupported_inference；只能明确收回无依据的肯定结论或交由裁定，不能凭空补拍照、摹写等前情。材料形态本身不明才归ambiguity；明确只是人物怀疑时不要当成作者已证实的结论。不能仅因为恐怖题材就默认誊抄保留笔迹。`;
 
 export function mergeContinuityReview(specialist, general) {
-  const issueKey = (i) =>
-    JSON.stringify([
-      i.kind,
-      i.target.sourceId,
-      i.target.paragraph,
-      i.evidence.map((e) => e.quote).sort(),
-    ]);
-  const seen = new Set();
-  const issues = [...specialist.issues, ...general.issues]
-    .sort((a, b) => Number(b.blocking) - Number(a.blocking))
-    .filter((i) => {
-      const key = issueKey(i);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  const ids = new Map(issues.map((i, n) => [issueKey(i), `finding-${n + 1}`]));
+  const { issues, owners } = coalesceReviewFindings(
+    [...specialist.issues, ...general.issues].sort(
+      (a, b) => Number(b.blocking) - Number(a.blocking),
+    ),
+  );
+  const ids = new Map(issues.map((i, n) => [i, `finding-${n + 1}`]));
   return {
     ...general,
     continuityChecks: remapReviewChecks(
       specialist.continuityChecks,
-      new Map(specialist.issues.map((i) => [i.id, ids.get(issueKey(i))])),
+      new Map(specialist.issues.map((i) => [i.id, ids.get(owners.get(i))])),
     ),
     suppliedScopes: [specialist, general].flatMap(
       (r) => r.suppliedScopes || (r.suppliedScope ? [r.suppliedScope] : []),

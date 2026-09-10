@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 import { estimatedTokens, ensureBudget } from "./model-budget.mjs";
-import { stageInputLimit, requestOutput } from "./model-capabilities.mjs";
+import {
+  stageInputLimit,
+  requestOutput,
+  inputLimit,
+} from "./model-capabilities.mjs";
 import { modelDocument } from "./review-payload.mjs";
 import { validationReason } from "./structured.mjs";
 import { REVIEW_RESULT_VERSION, remapReviewChecks } from "./review-result.mjs";
 import { workflowMessages } from "./workflow-skill.mjs";
+import { coalesceReviewFindings } from "./review-dedup.mjs";
 
 const hash = (value) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
@@ -89,7 +94,7 @@ export function batchReviewDocuments(
   { profile, output = 6500, stage = "review", pins = [] } = {},
 ) {
   output = requestOutput(output, profile);
-  const limit = stageInputLimit(profile, output, stage);
+  let limit = stageInputLimit(profile, output, stage);
   if (estimatedTokens(messagesFor(doc), profile) <= limit) return [doc];
   const rows = rowsOf(doc),
     mandatory = pinnedRows(doc, pins);
@@ -106,6 +111,16 @@ export function batchReviewDocuments(
     ...mandatory,
     ...rows.filter((r) => r.source.editable).map((r) => r.id),
   ]);
+  // 优先完整保留当前章。软额度不应把本可一次阅读的正文切成两两组合，
+  // 否则同一情节反复出现，还会把未提供的前文误报为缺失。
+  // 仅在当前章确实放得下时弹性使用额度；硬上限与纠错余量仍保留。
+  const sharedSize = size(shared);
+  const completeChapterLimit = Math.min(
+    44000,
+    inputLimit(profile, output) - 1600,
+  );
+  if (sharedSize >= limit - 1000 && sharedSize < completeChapterLimit - 1000)
+    limit = Math.max(limit, Math.min(completeChapterLimit, sharedSize + 8000));
   if (size(shared) < limit - 1000) {
     const views = [];
     let selected = new Set(shared),
@@ -257,31 +272,26 @@ export async function runReviewBatches({
     }
   }
   if (results.length === 1) return results[0];
-  const issues = new Map(),
-    priors = new Map(),
+  const priors = new Map(),
     authors = new Map();
   for (const result of results) {
-    for (const issue of result.issues) {
-      const k = hash([issue.kind, issue.target, issue.evidence]);
-      // 分批未见前情不能自动删除事实；独立核对/作者裁定继续处理。
-      issues.set(k, {
-        ...issue,
-        ...(issue.kind === "missing_history" && issue.blocking
-          ? { resolution: "needs_confirmation" }
-          : {}),
-      });
-    }
+    for (const issue of result.issues)
+      if (issue.kind === "missing_history" && issue.blocking)
+        issue.resolution = "needs_confirmation";
     for (const p of result.priorFindings || [])
       if (!priors.has(p.id) || p.decision !== "dismissed") priors.set(p.id, p);
     for (const a of result.authorChecks || [])
       if (!authors.has(a.id) || !a.respected) authors.set(a.id, a);
   }
-  const mergedIssues = [...issues.values()].map((issue, i) => ({
+  const { issues, owners } = coalesceReviewFindings(
+    results.flatMap((r) => r.issues),
+  );
+  const mergedIssues = issues.map((issue, i) => ({
     ...issue,
     id: `batch-${doc.version.slice(0, 12)}-${i + 1}`,
   }));
   const mergedIds = new Map(
-    [...issues.keys()].map((key, i) => [key, mergedIssues[i].id]),
+    issues.map((issue, i) => [issue, mergedIssues[i].id]),
   );
   return {
     reviewResultVersion: REVIEW_RESULT_VERSION,
@@ -292,12 +302,7 @@ export async function runReviewBatches({
       (r) =>
         remapReviewChecks(
           r.continuityChecks,
-          new Map(
-            r.issues.map((i) => [
-              i.id,
-              mergedIds.get(hash([i.kind, i.target, i.evidence])),
-            ]),
-          ),
+          new Map(r.issues.map((i) => [i.id, mergedIds.get(owners.get(i))])),
         ) || [],
     ),
     suppliedScopes: results.flatMap((r) =>

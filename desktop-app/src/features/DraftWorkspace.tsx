@@ -46,6 +46,7 @@ export function DraftWorkspace({ task }: { task: ChapterTask }) {
   const issues = (task.reviewProgress?.issues || []).filter(
     (i) => !["closed", "verified", "stale"].includes(i.status),
   );
+  const suggestions = issues.filter((i) => i.status === "advisory").length;
   const issueIds = selected.filter((id) => issues.some((i) => i.id === id));
   const needsInstruction = issues.filter(
     (i) => issueIds.includes(i.id) && i.requiresInstruction,
@@ -111,10 +112,13 @@ export function DraftWorkspace({ task }: { task: ChapterTask }) {
         ))}
       </details>
       {!!issues.length && (
-        <details open className="draft-issues">
-          <summary>待处理问题与建议 · {issues.length} 项</summary>
+        <details className="draft-issues">
+          <summary>
+            审稿发现 · {issues.length - suggestions} 项待核对 · {suggestions}{" "}
+            项可选建议
+          </summary>
           <p className="small muted">
-            勾选问题后，点击“自动修改所选问题”。需补充要求的条目，请先在下方说明怎么改，也可以选择保留原文。
+            这些是审稿记录，不需要逐项回答。可以继续审查并自动修改；也可以展开后选定问题处理。只有明确标为“需补充要求”的条目需要说明修改方向。
           </p>
           <div className="draft-issue-list">
             {issues.map((i) => (
@@ -137,7 +141,7 @@ export function DraftWorkspace({ task }: { task: ChapterTask }) {
                     {i.requiresInstruction
                       ? "需补充要求"
                       : i.status === "awaiting_author"
-                        ? "待确认取舍"
+                        ? "待核对取舍"
                         : i.status === "advisory"
                           ? "参考建议"
                           : "待修改"}

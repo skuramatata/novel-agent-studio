@@ -24,6 +24,7 @@ import {
 } from "./workflow-skill.mjs";
 
 export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-2:author-ids-1:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}:${WORKFLOW_SKILL.hash}`;
+export const REVIEW_BATCH_PROTOCOL = "complete-chapter-review-2";
 const authorStages = new Set([
   "review",
   "continuity_review",
@@ -36,6 +37,12 @@ const authorStages = new Set([
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
   const step = state.structuredSteps?.[failure?.stepId];
+  if (
+    ["review", "continuity_review"].includes(step?.contractId) &&
+    /分批/.test(step.label || "") &&
+    step.reviewBatchProtocol !== REVIEW_BATCH_PROTOCOL
+  )
+    return null;
   if (step && (state.revisionBudget?.epoch || 0) > (step.authorEpoch || 0))
     return null;
   if (
@@ -150,6 +157,9 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       status: "pending",
       input: structuredClone(baseMessages),
       contractId: contract.id,
+      ...(["review", "continuity_review"].includes(contract.id)
+        ? { reviewBatchProtocol: REVIEW_BATCH_PROTOCOL }
+        : {}),
       authorEpoch: revisionBudget(state).epoch,
       ...(contract.id === "arbitration"
         ? { arbitrationEvidenceVersion: ARBITRATION_EVIDENCE_VERSION }

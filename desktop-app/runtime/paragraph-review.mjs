@@ -24,6 +24,7 @@ import {
   reviewWorkflow,
   reviewStep,
   trackFindings,
+  trackCompleteReview,
   markIssues,
   recordGroundedFindings,
   authorConstraints,
@@ -155,6 +156,9 @@ const specialistSchema = reviewSchema.omit({ issues: true }).extend({
           dimension: continuityCheckSchema.shape.dimension,
           verdict: z.literal("issues"),
           issues: z.array(findingSchema).min(1).max(16),
+          // 已观察到模型在维度层补空占位；只兼容空值，不吞掉有效修订要求。
+          preserve: z.array(z.never()).max(0).optional(),
+          fix: z.literal("").optional(),
         }),
         continuityCheckSchema.extend({
           verdict: z.enum(["consistent", "insufficient", "not_applicable"]),
@@ -539,7 +543,7 @@ kind：contradiction两处陈述不能同时成立；missing_history把没交代
 missing_history和unsupported_inference须先核对本批提供的原文，只能说在此范围内未找到，不得把检索未命中写成全书没有。不要输出searchedSources：本批实际提供的来源与段落由程序记录。历史出处不足且剧情必须依赖该事件时，用needs_confirmation。unsupported_inference可以据实收回无依据断言，保留可观察事实，不能补造照片、对白或过去事件。
 resolution：preserve_evidence表示有充分依据确定应保留的事实，preserve必须引用该事实；remove_unsupported表示仅删除无出处断言，不新增对白、行动或往事；needs_confirmation表示两种事实无法裁决，明确缺少什么；suggestion表示不强制修改。ambiguity默认只是疑点。
 target指定实际出错的一个段落，fix仅说明这一段的最小修改，不能要求重写整个场景。不把未来章纲或作者秘密作为角色已经知情的依据。需要修改别段时另列该段问题与证据。
-issues最多16条，合并重复问题，优先列出有证据的实质问题；explanation和fix各尽量在150字内，不重复讲述全文。证据只输出地址，不输出quote、全文或分析过程。
+issues最多16条，不是配额；合并同一事实冲突，优先列出有证据的实质问题。普通文学偏好不需要逐项提出。只因本批没提供某段前文，不能登记missing_history或要求作者确认；须有实际原文证明该事件是不可缺少却未成立的前提。人物猜测、叙述留白与物品来源未逐一交代，不自动成为缺陷。explanation和fix各尽量在150字内，不重复讲述全文。证据只输出地址，不输出quote、全文或分析过程。
 只输出一个完整JSON对象，允许issues为空。`;
 
 function reviewPrompt(continuity = false) {
@@ -876,7 +880,7 @@ export async function reviewAndPatch({
         });
         if (cycle.continuityReview)
           value = mergeContinuityReview(cycle.continuityReview, value);
-        value.issues = trackFindings(
+        value.issues = trackCompleteReview(
           state,
           applyAuthorDecisions(state, value.issues, doc),
           doc.version,

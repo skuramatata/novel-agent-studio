@@ -20,6 +20,15 @@ export function draftFeedback(task: ChapterTask | null | undefined): {
     (i) => !["closed", "verified", "stale"].includes(i.status),
   );
   const changed = action.changed ? "当前草稿已更新。" : "本次正文没有变化。";
+  const answers = task.review?.answers || [];
+  const awaiting =
+    task.review?.issues.filter((i) => !answers.some((a) => a.issueId === i.id))
+      .length || 0;
+  const suggestions = remaining.filter((i) => i.status === "advisory").length;
+  const unresolved = remaining.length - suggestions;
+  const counts = remaining.length
+    ? `审稿记录：${unresolved} 项待核对，${suggestions} 项可选建议。${awaiting ? `当前需要你回答 ${awaiting} 项情节选择。` : "当前没有待回答的情节选择。"}`
+    : "";
   if (task.status === "failed" || task.status === "interrupted")
     return {
       kind: "error",
@@ -49,13 +58,13 @@ export function draftFeedback(task: ChapterTask | null | undefined): {
   if (action.type === "deliver")
     return {
       kind: "success",
-      text: `已生成待采纳候选，采纳后才更新正式章节。${remaining.length ? `仍有 ${remaining.length} 项问题或建议。` : ""}`,
+      text: `已生成待采纳候选，采纳后才更新正式章节。${counts}`,
     };
   return {
     kind:
       task.status === "awaiting_instruction" || remaining.length
         ? "attention"
         : "success",
-    text: `${changed}${task.status === "awaiting_instruction" ? task.error || "本回合自动处理已结束，可补充要求后继续。" : "已生成待采纳候选。"}${remaining.length ? `仍有 ${remaining.length} 项问题或建议；标为“需补充要求”的条目需要说明怎么改，或选择保留原文。` : ""}`,
+    text: `${changed}${task.status === "awaiting_instruction" ? task.error || "本回合自动处理已结束，可补充要求后继续。" : "已生成待采纳候选。"}${counts}`,
   };
 }
