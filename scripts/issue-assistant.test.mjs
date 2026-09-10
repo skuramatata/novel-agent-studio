@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {eligible,eventKey,allowed,render,retrieve,terms} from './issue-assistant.mjs';
+import {eligible,eventKey,allowed,render,retrieve,terms,conversation,smallTalk,searchQuery} from './issue-assistant.mjs';
 const event={issue:{number:1,state:'open'},sender:{login:'author',type:'User'}};
 const bot=body=>({user:{login:'github-actions[bot]'},body});
 test('事件过滤：机器人、PR、已关闭问题与普通评论不会触发',()=>{
@@ -26,7 +26,8 @@ test('检索不读取环境文件、小说正文、工作流或配置',()=>{
 test('引用仅允许命中的片段，链接固定到提交，屏蔽批量提及',()=>{
   const sources=[{id:'S1',file:'README.md',start:1,end:20}];
   assert.throws(()=>render({answer:'x',sources:['S2']},sources,'owner/repo','abc'));
-  const text=render({answer:'@all https://evil.example <x>',sources:['S1']},sources,'owner/repo','abc');
+  assert.throws(()=>render({answer:'接口 https://evil.example',sources:['S1']},sources,'owner/repo','abc'),/正文含链接/);
+  const text=render({answer:'@all 请检查模型连接。 <x>',sources:['S1']},sources,'owner/repo','abc');
   assert.ok(text.includes('/blob/abc/README.md#L1-L20'));
   assert.ok(!text.includes('@all'));
   assert.ok(!text.includes('evil.example'));
@@ -66,22 +67,57 @@ test('模拟端到端：GitHub 读取 → DeepSeek JSON → 待发布产物；�
       assert.equal(options.headers.Authorization,'Bearer test-deepseek');
       const request=JSON.parse(options.body);
       assert.ok(request.messages[1].content.includes('审稿失败可以检查版本和日志'));
+      const payload=JSON.parse(request.messages[1].content);
+      assert.equal(payload.currentMessage,'审稿失败\n如何排查？');
+      assert.equal(payload.originalIssue.title,'审稿失败');
       modelCalls++;
+      if(modelCalls===1) return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({answer:'接口 https://example.com',sources:['S1']})}}]});
+      assert.ok(request.messages.at(-1).content.includes('重新输出 JSON'));
       return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({answer:'请提供完整版本和日志。',sources:['S1']})}}]});
     };
     await main();
     const reply=JSON.parse(await readFile('reply.json','utf8'));
     assert.equal(reply.marker,eventKey(event));
     assert.ok(reply.body.includes('/blob/abc/README.md'));
-    assert.equal(modelCalls,1);
+    assert.equal(modelCalls,2);
     await rm('reply.json');
     globalThis.fetch=async(url)=> url.startsWith('https://api.github.com/') ? Response.json(url.includes('/comments?')?[]:{...event.issue,title:'问题'}) : new Response('',{status:401});
     await assert.rejects(main(),/DeepSeek 请求失败：401/);
     await assert.rejects(readFile('reply.json'),/ENOENT/);
+    await writeFile('event.json',JSON.stringify({...event,comment:{id:22,body:'/ai 你好',user:event.sender}}));
+    delete process.env.DEEPSEEK_API_KEY;
+    globalThis.fetch=async(url)=>{
+      assert.ok(url.startsWith('https://api.github.com/'),'问候不得调用模型');
+      return Response.json(url.includes('/comments?')?[]:{...event.issue,title:'问题'});
+    };
+    await main();
+    const greeting=JSON.parse(await readFile('reply.json','utf8'));
+    assert.ok(greeting.body.includes('你好！'));
+    assert.ok(!greeting.body.includes('参考依据'));
+    assert.ok(!greeting.body.includes('未找到足够'));
+    assert.ok(greeting.body.length<200);
+
   } finally {
     globalThis.fetch=originalFetch;
     process.chdir(originalCwd);
     for(const k of keys) if(saved[k]===undefined) delete process.env[k]; else process.env[k]=saved[k];
     await rm(temp,{recursive:true,force:true});
   }
+});
+
+test('当前追问独立，历史排除当前消息及未来消息，新话题不混入旧问题',()=>{
+  const issue={title:'模型配置',body:'怎么配置 GLM？'};
+  const current={...event,comment:{id:20,body:'/ai 审稿失败怎么恢复？',user:event.sender}};
+  const comments=[{id:10,user:event.sender,body:'/ai 模型在哪里配置？'},{id:20,user:event.sender,body:current.comment.body},{id:30,user:event.sender,body:'后续消息'}];
+  const input=conversation(issue,current,comments);
+  assert.equal(input.currentMessage,'审稿失败怎么恢复？');
+  assert.equal(input.history.length,1);
+  assert.equal(searchQuery(input),'审稿失败怎么恢复？');
+  assert.ok(searchQuery({...input,currentMessage:'这个在哪里配置？'}).includes('模型配置'));
+});
+test('问候和感谢简短处理，带真实问题的问候不能被吞掉',()=>{
+  for(const text of ['你好！','谢谢','收到','Hi!']) assert.ok(smallTalk(text));
+  assert.equal(smallTalk('你好，审稿失败怎么办？'),null);
+  assert.equal(smallTalk('谢谢，请继续排查'),null);
+  assert.ok(smallTalk(''));
 });
