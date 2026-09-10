@@ -1,3 +1,4 @@
+import { usesHighReasoning } from "./reasoning-budget.mjs";
 import { countTokens } from "gpt-tokenizer/encoding/o200k_base";
 import {
   modelCapabilities,
@@ -34,6 +35,14 @@ export function createBudgetProfile(config = {}, previous) {
     key,
     factor: reusable ? previous.factor : DEFAULT_FACTOR,
     samples: reusable ? previous.samples : 0,
+    highReasoning: usesHighReasoning(config),
+    reasoningPeaks: reusable
+      ? Object.fromEntries(
+          Object.entries(previous.reasoningPeaks || {}).filter(
+            ([, n]) => Number.isSafeInteger(n) && n > 0,
+          ),
+        )
+      : {},
     capabilities: modelCapabilities(config),
   };
 }

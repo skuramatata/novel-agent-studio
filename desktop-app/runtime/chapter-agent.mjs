@@ -1,3 +1,4 @@
+import { initialOutput, observeReasoning } from "./reasoning-budget.mjs";
 import { fitWritingContext } from "./context-budget.mjs";
 import { z } from "zod";
 import { complete } from "./providers.mjs";
@@ -83,7 +84,9 @@ export async function runChapterAgent(
   state.tokenBudget = budget;
   async function call(messages, tokens, label, partial = false) {
     if (!partial) messages = proseWorkflowMessages(messages);
-    tokens = requestOutput(tokens, budget);
+    tokens = partial
+      ? requestOutput(tokens, budget)
+      : initialOutput(tokens, budget, "prose");
     signal.throwIfAborted();
     state.stage = label;
     const selected = fitWritingContext(messages, tokens, budget);
@@ -132,6 +135,7 @@ export async function runChapterAgent(
     try {
       result = await complete(config, messages, signal, fetcher, tokens, {
         allowPartial: partial,
+        onProgress: (detail) => progress(`${label} · ${detail}`),
       });
     } catch (e) {
       appendCreationEvent(state, {
@@ -143,6 +147,7 @@ export async function runChapterAgent(
       await save();
       throw e;
     }
+    if (!partial) observeReasoning(budget, "prose", result.usage);
     state.usages.push(result.usage);
     observeTokenUsage(budget, messages, result.usage);
     appendCreationEvent(state, {

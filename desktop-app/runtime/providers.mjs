@@ -1,3 +1,7 @@
+import {
+  readCompletionStream,
+  createStreamProgress,
+} from "./provider-stream.mjs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,7 +79,32 @@ export async function complete(
   maxTokens = 8000,
   options = {},
 ) {
+  const progress = createStreamProgress(options.onProgress);
+  try {
+    return await requestCompletion(
+      config,
+      messages,
+      signal,
+      fetcher,
+      maxTokens,
+      options,
+      progress,
+    );
+  } finally {
+    progress.stop();
+  }
+}
+async function requestCompletion(
+  config,
+  messages,
+  signal,
+  fetcher,
+  maxTokens,
+  options,
+  progress,
+) {
   validateProvider(config);
+  signal?.throwIfAborted();
   if (!config.apiKey) throw new Error("尚未配置此供应商的 API Key。");
   const response = await fetcher(
     config.baseUrl.replace(/\/$/, "") + "/chat/completions",
@@ -90,7 +119,7 @@ export async function complete(
       body: JSON.stringify({
         model: config.model,
         messages,
-        stream: false,
+        stream: true,
         [modelCapabilities(config).outputParameter]: Math.min(
           maxTokens,
           modelCapabilities(config).maxOutputTokens,
@@ -141,7 +170,14 @@ export async function complete(
       `模型接口返回 HTTP ${response.status}。请检查套餐密钥、模型权限或额度；未切换其他计费入口。`,
     );
   }
-  const data = await response.json();
+  const data = response.headers
+    ?.get("content-type")
+    ?.includes("text/event-stream")
+    ? await readCompletionStream(response, signal, (delta) =>
+        progress.update(delta),
+      )
+    : await response.json();
+  signal?.throwIfAborted();
   if (data.base_resp && data.base_resp.status_code !== 0)
     throw new Error(
       `MiniMax 业务错误 ${data.base_resp.status_code}，请检查密钥与套餐权限。`,

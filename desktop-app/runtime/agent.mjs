@@ -1,7 +1,7 @@
+import { initialOutput, observeReasoning } from "./reasoning-budget.mjs";
 import { z } from "zod";
 import { workflowContract, workflowMessages } from "./workflow-skill.mjs";
 import { projectWordTolerance, wordToleranceLabel } from "./word-range.mjs";
-import { requestOutput } from "./model-capabilities.mjs";
 import { complete } from "./providers.mjs";
 import { parseStructured, structuredRetryMessages } from "./structured.mjs";
 import {
@@ -102,7 +102,7 @@ export async function runAgent(
   const usages = [];
   let last = "";
   for (let attempt = 0; attempt < 2; attempt++) {
-    const output = requestOutput(8000, budget);
+    const output = initialOutput(8000, budget);
     const inputEstimate = ensureBudget(messages, output, budget);
     progress(attempt ? "修复候选结构与约束" : "正在依据作者档案与作品规划生成");
     await options.onLog?.({
@@ -112,18 +112,24 @@ export async function runAgent(
       details: {
         调用次数: calls + 1,
         输入估算: inputEstimate,
-        输出预算: 8000,
+        输出预算: output,
         估算方式: `本地BPE × ${budget.factor}（非供应商实际Token）`,
       },
     });
     calls++;
     let result;
     try {
-      result = await complete(config, messages, signal, fetcher, output);
+      result = await complete(config, messages, signal, fetcher, output, {
+        onProgress: (detail) =>
+          progress(
+            `${attempt ? "修复候选结构与约束" : "规划与讨论"} · ${detail}`,
+          ),
+      });
     } catch (error) {
       error.details = { calls, usages, stage: "provider" };
       throw error;
     }
+    observeReasoning(budget, "general", result.usage);
     usages.push(result.usage);
     observeTokenUsage(budget, messages, result.usage);
     await options.onLog?.({
@@ -220,7 +226,7 @@ async function runWritingTask(
       signal.throwIfAborted();
       if (calls >= MAX_CALLS) throw Error("已达到本轮调用预算，未提交候选。");
       const reasoning = options.reasoning === true;
-      const output = requestOutput(
+      const output = initialOutput(
         reasoning ? Math.min(20000, tokens + 6000) : tokens,
         budget,
       );
@@ -232,8 +238,9 @@ async function runWritingTask(
         signal,
         fetcher,
         output,
-        { reasoning },
+        { reasoning, onProgress: (detail) => progress(`${name} · ${detail}`) },
       );
+      observeReasoning(budget, "general", response.usage);
       usages.push(response.usage);
       observeTokenUsage(budget, messages, response.usage);
       model = response.model;

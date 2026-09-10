@@ -1,6 +1,6 @@
 {
   "name": "novel-agent-studio",
-  "version": "0.1.95",
+  "version": "0.1.97",
   "private": true,
   "type": "module",
   "main": "electron/main.mjs",

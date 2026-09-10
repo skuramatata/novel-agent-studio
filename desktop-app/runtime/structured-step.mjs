@@ -1,3 +1,9 @@
+import {
+  initialOutput,
+  observeReasoning,
+  canUpgradeOutput,
+  OUTPUT_POLICY,
+} from "./reasoning-budget.mjs";
 import { digest } from "./memory.mjs";
 import { requestOutput } from "./model-capabilities.mjs";
 import { stageCategory, appendCreationEvent } from "./creation-log.mjs";
@@ -37,6 +43,7 @@ const authorStages = new Set([
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
   const step = state.structuredSteps?.[failure?.stepId];
+  if (canUpgradeOutput(state, step)) return null;
   if (
     ["review", "continuity_review"].includes(step?.contractId) &&
     /分批/.test(step.label || "") &&
@@ -172,7 +179,8 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       expansions: 0,
       calls: 0,
       maxCorrections: options.maxCorrections === 2 ? 2 : 1,
-      outputBudget: requestOutput(tokens, budget),
+      outputBudget: initialOutput(tokens, budget, contract.id),
+      ...(budget.highReasoning ? { outputPolicy: OUTPUT_POLICY } : {}),
     });
     if (step.status === "succeeded") {
       const value = validateResponse(
@@ -196,6 +204,28 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       await save();
       throw error;
     };
+    if (
+      canUpgradeOutput(state, step) &&
+      budget.highReasoning &&
+      requestOutput(24000, budget) > step.outputBudget
+    ) {
+      step.previousOutputFailure = {
+        ...step.lastFailure,
+        outputBudget: step.outputBudget,
+        expansions: step.expansions,
+      };
+      step.outputBudget = requestOutput(24000, budget);
+      step.outputPolicy = OUTPUT_POLICY;
+      step.status = "pending";
+      // 保留旧扩容次数：只开放一次新额度请求，不刷新纠错与扩容预算。
+      appendCreationEvent(state, {
+        category: stageCategory(label),
+        status: "waiting",
+        title: `${label} · 按高强度思考预算恢复`,
+        details: { 新输出预算: step.outputBudget },
+      });
+      await save();
+    }
     if (step.status === "exhausted") return stop();
     // 只有输入/协议确实变化并进入另一个步骤，才建立新的执行预算。
     if (state.structuredFailure?.stepId !== id) delete state.structuredFailure;
@@ -205,6 +235,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     tokens = requestOutput(
       Math.max(
         step.outputBudget,
+        initialOutput(tokens, budget, contract.id),
         Number.isSafeInteger(previous) && previous <= MAX_STRUCTURED_OUTPUT
           ? previous
           : 0,
@@ -244,6 +275,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         await save();
         // 网络中断保留本次纠错输入；不刷新格式纠错预算。
         const response = await call(messages, tokens, label, true);
+        observeReasoning(budget, contract.id, response.usage);
         step.calls++;
         const rawKey = `raw:${key}:step-${id.slice(0, 12)}:${step.calls}`;
         state.fragments[rawKey] = response.text;

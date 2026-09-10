@@ -268,3 +268,72 @@ test("纠错响应截断后断网，重启保留诊断、扩容量和所有已�
     /预算已用尽/,
   );
 });
+
+test("旧GLM high截断任务只获一次新额度恢复机会，历史调用保留", async () => {
+  const config = {
+    provider: "glm",
+    model: "glm-5.3",
+    baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+  };
+  for (const recovered of [true, false]) {
+    const state = {
+      ...config,
+      id: "migration",
+      status: "failed",
+      values: {},
+      fragments: {},
+    };
+    const seen = [];
+    const save = async () => {};
+    const options = { contract: testContract };
+    // 构造旧策略实际的3000/6000/12000耗尽记录，保留同一模型/输入key。
+    const oldBudget = createBudgetProfile(config);
+    oldBudget.highReasoning = false;
+    const old = createStructuredAsker({
+      state,
+      budget: oldBudget,
+      save,
+      call: async (_, tokens) => {
+        seen.push(tokens);
+        return response(json, "length");
+      },
+    });
+    await assert.rejects(
+      old("outlines", messages, validate, 3000, "章纲", options),
+      /预算已用尽/,
+    );
+    assert.deepEqual(seen, [3000, 6000, 12000]);
+    assert.equal(blockedStructuredRecovery(state), null);
+    const ask = createStructuredAsker({
+      state,
+      budget: createBudgetProfile(config),
+      save,
+      call: async (_, tokens) => {
+        seen.push(tokens);
+        return response(json, recovered ? "stop" : "length");
+      },
+    });
+    if (recovered)
+      assert.deepEqual(
+        await ask("outlines", messages, validate, 3000, "章纲", options),
+        { paragraph: 1 },
+      );
+    else {
+      await assert.rejects(
+        ask("outlines", messages, validate, 3000, "章纲", options),
+        /预算已用尽/,
+      );
+      assert(blockedStructuredRecovery(state));
+      await assert.rejects(
+        ask("outlines", messages, validate, 3000, "章纲", options),
+        /预算已用尽/,
+      );
+    }
+    assert.deepEqual(seen, [3000, 6000, 12000, 24000]);
+    const step = Object.values(state.structuredSteps)[0];
+    assert.equal(step.calls, 4);
+    assert.equal(step.expansions, 2);
+    assert.equal(step.previousOutputFailure.outputBudget, 12000);
+    assert.equal(Object.keys(state.fragments).length, 4);
+  }
+});
