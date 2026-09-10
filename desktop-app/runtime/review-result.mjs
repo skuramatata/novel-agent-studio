@@ -44,14 +44,23 @@ export function suppliedReviewScope(doc) {
 
 // 专项问题只有一个输入位置；问题列表、编号及汇总状态由程序生成。
 // 老检查点/响应继续走原校验，不能丢弃其未列入 issues 的 problem。
-export function normalizeSpecialistResult(value) {
+export function normalizeSpecialistResult(
+  value,
+  expected = ["time", "state", "evidence"],
+) {
   if (!value?.dimensions) return value;
   if (value.issues !== undefined || value.continuityChecks !== undefined)
     throw Error(
       "专项新格式只在 dimensions 内提供问题，不得同时提供另一份 issues 或 continuityChecks。",
     );
-  const dimensions = z.array(dimensionSchema).length(3).parse(value.dimensions);
-  if (new Set(dimensions.map((d) => d.dimension)).size !== 3)
+  const dimensions = z
+    .array(dimensionSchema)
+    .length(expected.length)
+    .parse(value.dimensions);
+  if (
+    new Set(dimensions.map((d) => d.dimension)).size !== expected.length ||
+    dimensions.some((d) => !expected.includes(d.dimension))
+  )
     throw Error(
       "dimensions 必须分别覆盖 time、state、evidence，不得重复或遗漏。",
     );

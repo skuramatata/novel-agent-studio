@@ -208,6 +208,7 @@ export async function runReviewBatches({
   state,
   save,
   contract,
+  requestOptions = {},
 }) {
   const messagesFor = contract
     ? (view) => workflowMessages(inputMessagesFor(view), contract)
@@ -263,7 +264,7 @@ export async function runReviewBatches({
       views.length === 1
         ? label
         : `${label} · 分批 ${index + 1}/${views.length}`,
-      { maxCorrections: 2, contract },
+      { maxCorrections: 2, contract, ...requestOptions },
     );
     results.push(validateResult(result));
     if (views.length > 1 && state) {
@@ -271,6 +272,9 @@ export async function runReviewBatches({
       await save?.();
     }
   }
+  return mergeReviewResults(results, doc);
+}
+export function mergeReviewResults(results, doc) {
   if (results.length === 1) return results[0];
   const priors = new Map(),
     authors = new Map();
@@ -305,10 +309,10 @@ export async function runReviewBatches({
           new Map(r.issues.map((i) => [i.id, mergedIds.get(owners.get(i))])),
         ) || [],
     ),
-    suppliedScopes: results.flatMap((r) =>
-      r.suppliedScope ? [r.suppliedScope] : [],
+    suppliedScopes: results.flatMap(
+      (r) => r.suppliedScopes || (r.suppliedScope ? [r.suppliedScope] : []),
     ),
-    batchCoverage: { total: views.length, completed: results.length },
+    batchCoverage: { total: results.length, completed: results.length },
   };
 }
 

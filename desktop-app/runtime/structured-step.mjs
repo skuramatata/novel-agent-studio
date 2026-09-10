@@ -1,3 +1,4 @@
+import { canMigrateReview, REVIEW_EFFORTS } from "./review-policy.mjs";
 import { canMigrateMemoryExtraction } from "./memory-extraction-policy.mjs";
 import {
   initialOutput,
@@ -44,7 +45,11 @@ const authorStages = new Set([
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
   const step = state.structuredSteps?.[failure?.stepId];
-  if (canUpgradeOutput(state, step) || canMigrateMemoryExtraction(state, step))
+  if (
+    canUpgradeOutput(state, step) ||
+    canMigrateMemoryExtraction(state, step) ||
+    canMigrateReview(state, step)
+  )
     return null;
   if (
     ["review", "continuity_review"].includes(step?.contractId) &&
@@ -106,6 +111,11 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     signal?.throwIfAborted();
     const contract = options.contract;
     assertWorkflowStage(state, contract);
+    if (budget.highReasoning && REVIEW_EFFORTS[contract.id])
+      options = {
+        ...options,
+        reasoningEffort: options.reasoningEffort || REVIEW_EFFORTS[contract.id],
+      };
     const outputScope =
       options.reasoningEffort === "low" ? `${contract.id}:low` : contract.id;
     messages = workflowMessages(messages, contract);
@@ -168,6 +178,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       status: "pending",
       input: structuredClone(baseMessages),
       contractId: contract.id,
+      ...(options.reviewPolicy ? { reviewPolicy: options.reviewPolicy } : {}),
       ...(options.memoryExtractionPolicy
         ? { memoryExtractionPolicy: options.memoryExtractionPolicy }
         : {}),

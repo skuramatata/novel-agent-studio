@@ -1,4 +1,9 @@
-import { runReviewBatches, runLocalTasks } from "./review-context.mjs";
+import { REVIEW_POLICY, REVIEW_DIMENSIONS } from "./review-policy.mjs";
+import {
+  runReviewBatches,
+  runLocalTasks,
+  mergeReviewResults,
+} from "./review-context.mjs";
 import { validationReason } from "./structured.mjs";
 import { workflowContract } from "./workflow-skill.mjs";
 import {
@@ -177,6 +182,22 @@ const specialistContract = workflowContract(
     }),
   ]),
   { displaySchema: specialistSchema },
+);
+const dimensionContracts = Object.fromEntries(
+  REVIEW_DIMENSIONS.map(({ id }) => {
+    const schema = specialistSchema.extend({
+      dimensions: z
+        .array(
+          z.union(
+            specialistSchema.shape.dimensions.element.options.map((option) =>
+              option.extend({ dimension: z.literal(id) }),
+            ),
+          ),
+        )
+        .length(1),
+    });
+    return [id, workflowContract("continuity_review", schema)];
+  }),
 );
 export function bindPatchVersion(value, doc) {
   if (value.baseVersion !== undefined && value.baseVersion !== doc.version)
@@ -602,7 +623,45 @@ function reviewPrompt(continuity = false) {
   return `${REVIEW_PROMPT}\n${continuity ? CONTINUITY_REVIEW_RULES + "\n" : ""}所有字段放在同一个顶层对象内，不在闭合的JSON后追加字段。格式示例（请按实际原文填写）：${JSON.stringify(example)}`;
 }
 
-export async function auditContinuity({
+function dimensionPrompt(dimension) {
+  const allowed = {
+    time: [1, 5, 6, 7],
+    state: [2, 5, 6],
+    evidence: [3, 4, 5, 6, 7],
+  }[dimension.id];
+  const rules = CONTINUITY_REVIEW_RULES.split("\n")
+    .filter((line) => {
+      const match = line.match(/^-([1-7])\./);
+      return match
+        ? allowed.includes(Number(match[1]))
+        : line.startsWith("-本轮") ||
+            (dimension.id === "evidence" && line.startsWith("-推理"));
+    })
+    .join("\n")
+    .replace(
+      "dimensions恰好三项，dimension分别time/state/evidence",
+      `dimensions恰好一项，dimension只能为${dimension.id}`,
+    )
+    .replace("三个维度合计", "本维度");
+  const boundary = {
+    time: "只检查日期、间隔、事件与叙述先后。物件归属与证词可靠性由其他步骤检查，不列入本轮问题。",
+    state:
+      "只检查人物所在位置、人数和物件持有、移动、交接、销毁。不得报告日期或天数计算错误；时间只用于判断状态变化的先后。",
+    evidence:
+      "只检查观察、证词、文件、人物猜测与结论之间的支持关系。明确保留为怀疑、传闻或幻觉的内容不自动构成错误。日期计算与物件位置连续性由其他步骤检查，不重复报告。",
+  }[dimension.id];
+  return `${REVIEW_PROMPT}\n本轮仅执行${dimension.label}。${boundary}\n${rules}\n只输出一个顶层JSON对象，dimensions只含${dimension.id}这一项；不能评价其他维度或声称已检查其他维度。`;
+}
+
+export async function auditContinuity(options) {
+  if (!options.profile?.highReasoning) return auditContinuityPart(options);
+  const results = [];
+  for (const dimension of REVIEW_DIMENSIONS) {
+    results.push(await auditContinuityPart({ ...options, dimension }));
+  }
+  return mergeReviewResults(results, options.doc);
+}
+async function auditContinuityPart({
   doc,
   context,
   ledger = context.continuity,
@@ -612,21 +671,26 @@ export async function auditContinuity({
   state,
   save,
   key = `continuity-1:${doc.version}`,
+  dimension,
 }) {
+  const expected = dimension ? [dimension.id] : ["time", "state", "evidence"];
   return runReviewBatches({
     doc,
     profile,
     state,
     save,
     ask,
-    key: `${key}:${REVIEW_RESULT_VERSION}`,
+    key: `${key}:${REVIEW_RESULT_VERSION}${dimension ? `:${REVIEW_POLICY}:${dimension.id}` : ""}`,
     stage: "continuity",
-    contract: specialistContract,
+    contract: dimension ? dimensionContracts[dimension.id] : specialistContract,
+    requestOptions: dimension
+      ? { reasoningEffort: dimension.effort, reviewPolicy: REVIEW_POLICY }
+      : {},
     pins: constraints,
     messagesFor: (view) => [
       {
         role: "system",
-        content: reviewPrompt(true),
+        content: dimension ? dimensionPrompt(dimension) : reviewPrompt(true),
       },
       {
         role: "user",
@@ -641,7 +705,7 @@ export async function auditContinuity({
       },
     ],
     validate: (value, view) => {
-      value = normalizeSpecialistResult(value);
+      value = normalizeSpecialistResult(value, expected);
       const failures = [];
       let result;
       try {
@@ -664,15 +728,18 @@ export async function auditContinuity({
             issueIds: z.array(z.string()).optional(),
           }),
         )
-        .length(3)
+        .length(expected.length)
         .safeParse(value.continuityChecks);
       if (!checks.success) {
         failures.push(`continuityChecks: ${validationReason(checks.error)}`);
         throw Error(failures.join("\n"));
       }
-      if (new Set(checks.data.map((c) => c.dimension)).size !== 3)
+      if (
+        new Set(checks.data.map((c) => c.dimension)).size !== expected.length ||
+        checks.data.some((c) => !expected.includes(c.dimension))
+      )
         failures.push(
-          "continuityChecks必须分别核对time、state、evidence，不得重复或漏项。",
+          `continuityChecks必须覆盖${expected.join("、")}，不得重复、越界或漏项。`,
         );
       // 其他字段未通过校验不表示issues缺失；这里只用原始结构检查关联，
       // failures仍阻止无效结果被接受，避免误导模型重复新增已有问题。
@@ -730,7 +797,7 @@ export async function auditContinuity({
       };
     },
     output: 6500,
-    label: "时间与事实专项审稿",
+    label: dimension?.label || "时间与事实专项审稿",
   });
 }
 
