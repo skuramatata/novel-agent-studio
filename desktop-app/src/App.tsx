@@ -173,11 +173,14 @@ export default function App() {
         </header>
         {tab !== "chat" && (
           <ReviewNotice
-            key={s.project.projectId}
+            key={`review-notice:${s.project.projectId}`}
             onOpen={() => setTab("chat")}
           />
         )}
-        <div className="workspace" key={s.project.projectId}>
+        <div
+          className="workspace"
+          key={`workspace:${s.project.projectId}:${s.project.rewrite?.epoch || "original"}`}
+        >
           {tab === "library" ? (
             <Library />
           ) : tab === "chat" ? (

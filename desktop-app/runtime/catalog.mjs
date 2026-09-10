@@ -1,7 +1,7 @@
 export const providerDefaults = {
   glm: {
     provider: "glm",
-    model: "glm-5.2",
+    model: "glm-5.3",
     baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
   },
   minimax: {

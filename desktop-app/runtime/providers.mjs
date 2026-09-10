@@ -101,17 +101,22 @@ export async function complete(
               ...(/^MiniMax-M3/i.test(config.model)
                 ? {
                     thinking: {
-                      type: options.reasoning ? "adaptive" : "disabled",
+                      type: "adaptive",
                     },
                   }
                 : {}),
             }
-          : {
-              thinking: { type: options.reasoning ? "enabled" : "disabled" },
-              ...(options.reasoning && /^glm-5\.2/i.test(config.model)
-                ? { reasoning_effort: "high" }
-                : {}),
-            }),
+          : /^glm-5\.3$/i.test(config.model)
+            ? {
+                thinking: { type: "enabled" },
+                reasoning_effort: "high",
+              }
+            : {
+                thinking: { type: options.reasoning ? "enabled" : "disabled" },
+                ...(options.reasoning && /^glm-5\.2/i.test(config.model)
+                  ? { reasoning_effort: "high" }
+                  : {}),
+              }),
       }),
     },
   );

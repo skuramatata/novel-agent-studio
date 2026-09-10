@@ -24,6 +24,7 @@ import { continuationTask } from "./continuation.mjs";
 export const WORKFLOW_VERSION = "chapter-memory-2";
 export function baseFingerprint(p) {
   return digest({
+    ...(p.rewrite ? { rewriteEpoch: p.rewrite.epoch } : {}),
     author: p.author,
     premise: p.premise,
     plan: p.plan,

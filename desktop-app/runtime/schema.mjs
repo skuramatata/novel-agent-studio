@@ -100,6 +100,14 @@ export const projectSchema = z
     author: authorSchema,
     premise: premiseSchema,
     writingSettings: writingSettingsSchema.optional(),
+    rewrite: z
+      .object({
+        epoch: z.string().uuid(),
+        backupId: z.string().uuid(),
+        instruction: z.string().max(8000),
+      })
+      .strict()
+      .optional(),
     plan: planSchema,
     characters: z.array(characterSchema).max(80),
     relations: z.array(relationSchema).max(300),

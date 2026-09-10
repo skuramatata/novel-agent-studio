@@ -262,7 +262,7 @@ test("取消正在等待的模型请求立即中断，不能返回候选", async
   control.abort();
   await stopped;
 });
-test("MiniMax M3关闭思考，M2不传不支持的关闭参数", async () => {
+test("MiniMax M3默认开启思考，M2不传不支持的开关", async () => {
   for (const model of ["MiniMax-M3", "MiniMax-M2.7"]) {
     let body;
     await complete(
@@ -282,7 +282,7 @@ test("MiniMax M3关闭思考，M2不传不支持的关闭参数", async () => {
     assert.equal(body.reasoning_split, true);
     assert.equal(
       body.thinking?.type,
-      model === "MiniMax-M3" ? "disabled" : undefined,
+      model === "MiniMax-M3" ? "adaptive" : undefined,
     );
   }
 });
@@ -304,8 +304,12 @@ test("无效候选记录失败次数与验证原因", async () => {
   }
 });
 
-test("复杂写作可开启M3思考，连通测试仍默认关闭，M2不传开关", async () => {
-  for (const model of ["MiniMax-M3", "MiniMax-M2.7"]) {
+test("M3普通与增强调用均开启思考，M2不传开关", async () => {
+  for (const [model, reasoning] of [
+    ["MiniMax-M3", false],
+    ["MiniMax-M3", true],
+    ["MiniMax-M2.7", true],
+  ]) {
     let body;
     await complete(
       {
@@ -321,7 +325,7 @@ test("复杂写作可开启M3思考，连通测试仍默认关闭，M2不传开�
         return response('{"summary":"结果"}');
       },
       12000,
-      { reasoning: true },
+      { reasoning },
     );
     assert.equal(
       body.thinking?.type,

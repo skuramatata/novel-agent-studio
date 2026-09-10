@@ -4,7 +4,7 @@
 
 ## 模型和请求预算
 
-`model-capabilities.mjs` 区分模型上下文、模型输出上限、接口独立输入/上下文限制和应用预算。GLM-5.2 内置官方1M/128K规格，应用预算默认120,000；MiniMax-M3按官方最低512K窗口、24,000保守输出回退及120,000应用预算配置。模型介绍不证明当前套餐入口权限；未单独核实的部分在界面和日志明确标注。未知模型回退60,000/24,000。
+`model-capabilities.mjs` 区分模型上下文、模型输出上限、接口独立输入/上下文限制和应用预算。GLM-5.3 与 GLM-5.2 内置官方1M/128K规格，应用预算默认120,000；MiniMax-M3按官方最低512K窗口、24,000保守输出回退及120,000应用预算配置。模型介绍不证明当前套餐入口权限；未单独核实的部分在界面和日志明确标注。未知模型回退60,000/24,000。
 
 模型连接的“Token预算”允许覆盖上述数值，按供应商、接口、模型和思考模式绑定；切换模型/接口会清空表单覆盖值。配置由主进程校验并保存，不保存在作品正文内。输出仍按任务需要申请，受模型上限约束；MiniMax适配器使用`max_completion_tokens`，GLM使用`max_tokens`。
 
@@ -43,4 +43,4 @@ Embedding使用`Xenova/paraphrase-multilingual-MiniLM-L12-v2`，固定revision `
 
 具体计数、版本和验证边界见`verification/context-memory-v3/`。
 
-来源：[GLM-5.2](https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2)、[MiniMax M3](https://www.minimax.io/models/text/m3)、[MiniMax兼容参数](https://platform.minimaxi.com/docs/api-reference/text-openai-api)、[本地推理](https://huggingface.co/docs/transformers.js/tutorials/node)、[Embedding模型](https://huggingface.co/Xenova/paraphrase-multilingual-MiniLM-L12-v2)。
+来源：[GLM-5.3](https://docs.z.ai/guides/llm/glm-5.3)、[GLM-5.2](https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2)、[MiniMax M3](https://www.minimax.io/models/text/m3)、[MiniMax兼容参数](https://platform.minimaxi.com/docs/api-reference/text-openai-api)、[本地推理](https://huggingface.co/docs/transformers.js/tutorials/node)、[Embedding模型](https://huggingface.co/Xenova/paraphrase-multilingual-MiniLM-L12-v2)。

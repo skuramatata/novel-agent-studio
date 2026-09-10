@@ -2,6 +2,7 @@ import { useState } from "react";
 import { BookOpen, Plus, Archive, ArchiveRestore } from "lucide-react";
 import { useStudio } from "../state/StudioContext";
 import type { ProjectSummary } from "../lib/types";
+import { RewritePanel } from "./RewritePanel";
 function WorkCard({ work }: { work: ProjectSummary }) {
   const s = useStudio();
   const [editing, setEditing] = useState(false);
@@ -100,6 +101,7 @@ export function Library() {
           </p>
         </div>
       </div>
+      <RewritePanel />
       <form
         className="panel create-work"
         onSubmit={async (e) => {

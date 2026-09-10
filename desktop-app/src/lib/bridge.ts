@@ -60,6 +60,13 @@ function canManage() {
   if (generating) throw Error("请等待生成结束或停止任务后管理作品。");
 }
 const preview: Bridge = {
+  rewrite: async () => {
+    throw Error("全部重写会备份并重新生成作品，请在桌面端操作。");
+  },
+  rewriteBackups: async () => [],
+  restoreRewrite: async () => {
+    throw Error("恢复重写备份请在桌面端操作。");
+  },
   logs: async () => ({
     tasks: [],
     selected: null,

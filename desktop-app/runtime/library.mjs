@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { ProjectStore } from "./storage.mjs";
 import { blankProject } from "./seed.mjs";
 import { projectSchema } from "./schema.mjs";
+import { RewriteBackups } from "./rewrite.mjs";
+import { rewrittenProject } from "./rewrite-plan.mjs";
 
 // 身份由作品库分配，不接受作品内容或模型输出改变所属作品。
 export class ProjectLibrary {
@@ -138,6 +140,56 @@ export class ProjectLibrary {
     const p = await this.load(id);
     p.premise.title = validTitle(title);
     return this.save(p, p.revision);
+  }
+  async runtimeDirectoryFor(id) {
+    const p = await this.load(id);
+    const root = this.directoryFor(id);
+    return p.rewrite ? join(root, "rewrite-runs", p.rewrite.epoch) : root;
+  }
+  async rewriteBackups(id) {
+    await this.load(id);
+    return new RewriteBackups(this.directoryFor(id), id).list();
+  }
+  async rewrite(id, revision, instruction = "") {
+    const p = await this.load(id);
+    this.checkRewrite(p, revision);
+    // 先验证输入，再落完整备份；project.json 的原子替换同时切换正文和运行目录。
+    const next = rewrittenProject(p, crypto.randomUUID(), instruction);
+    const backup = await new RewriteBackups(this.directoryFor(id), id).create(
+      p,
+      "rewrite",
+    );
+    next.rewrite.backupId = backup.id;
+    return this.save({ ...next, projectId: id }, revision);
+  }
+  checkRewrite(p, revision) {
+    if (p.revision !== revision)
+      throw Error("作品版本冲突，请重新载入后操作。");
+    if (!this.index.entries.some((e) => e.id === p.projectId && !e.archived))
+      throw Error("作品不存在或已归档");
+  }
+  async restoreRewrite(id, backupId, revision) {
+    const p = await this.load(id);
+    this.checkRewrite(p, revision);
+    const backups = new RewriteBackups(this.directoryFor(id), id);
+    const snapshot = await backups.read(backupId);
+    // 恢复也先备份当前稿。旧候选保留在历史对话中，但不可在新版本直接采纳。
+    const current = await backups.create(p, "restore");
+    return this.save(
+      {
+        ...snapshot.project,
+        projectId: id,
+        rewrite: {
+          epoch: crypto.randomUUID(),
+          backupId: current.id,
+          instruction: snapshot.project.rewrite?.instruction || "",
+        },
+        messages: snapshot.project.messages.map((m) =>
+          m.status === "pending" ? { ...m, status: "rejected" } : m,
+        ),
+      },
+      revision,
+    );
   }
   async archive(id, archived) {
     await this.init();

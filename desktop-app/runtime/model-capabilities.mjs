@@ -8,6 +8,14 @@ const defaults = {
   endpointContextLimit: null,
 };
 const catalog = {
+  "glm:glm-5.3": {
+    contextWindow: 1000000,
+    maxOutputTokens: 128000,
+    appContextCap: 120000,
+    source: "https://docs.z.ai/guides/llm/glm-5.3",
+    confidence: "官方模型规格；当前套餐入口上限未单独核实",
+    checkedAt: "2026-09-10",
+  },
   "glm:glm-5.2": {
     contextWindow: 1000000,
     maxOutputTokens: 128000,
@@ -89,7 +97,7 @@ export function modelCapabilities(config = {}) {
       ? "使用当前模型与入口的自定义配置"
       : known?.confidence ||
         "未知模型：60000上下文与24000输出保守回退，可按接口文档设置",
-    checkedAt: known ? "2026-09-09" : null,
+    checkedAt: known?.checkedAt || (known ? "2026-09-09" : null),
     outputParameter:
       config.provider === "minimax" ? "max_completion_tokens" : "max_tokens",
     version: CAPABILITY_VERSION,

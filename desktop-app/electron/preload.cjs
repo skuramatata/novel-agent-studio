@@ -7,6 +7,11 @@ contextBridge.exposeInMainWorld("studio", {
   list: () => ipcRenderer.invoke("studio:list"),
   select: (id) => ipcRenderer.invoke("studio:select", id),
   create: (title) => ipcRenderer.invoke("studio:create", title),
+  rewrite: (id, revision, instruction) =>
+    ipcRenderer.invoke("studio:rewrite", id, revision, instruction),
+  rewriteBackups: (id) => ipcRenderer.invoke("studio:rewrite-backups", id),
+  restoreRewrite: (id, backupId, revision) =>
+    ipcRenderer.invoke("studio:restore-rewrite", id, backupId, revision),
   rename: (id, title) => ipcRenderer.invoke("studio:rename", id, title),
   archive: (id, archived) => ipcRenderer.invoke("studio:archive", id, archived),
   save: (p, r) => ipcRenderer.invoke("studio:save", p, r),

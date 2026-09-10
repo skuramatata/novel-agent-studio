@@ -14,12 +14,14 @@ import {
 import { useStudio } from "../state/StudioContext";
 import { isDesktop } from "../lib/bridge";
 import { readyForChapter } from "../../runtime/schema.mjs";
+import { providerDefaults } from "../../runtime/catalog.mjs";
 import type { Message } from "../lib/types";
 import { ReviewResolution } from "./ReviewResolution";
 import { useReviewChat } from "./useReviewChat";
 import { ReviewProgress } from "./ReviewProgress";
 import { DraftWorkspace } from "./DraftWorkspace";
 import { useDraftActions } from "./useDraftActions";
+import { RewritePanel } from "./RewritePanel";
 function Candidate({ message }: { message: Message }) {
   const { accept, update, project, busy } = useStudio();
   const [expanded, setExpanded] = useState(false);
@@ -425,7 +427,7 @@ export function Chat() {
                 disabled={busy}
               >
                 <option value="glm">
-                  GLM · {settings?.glm.model || "glm-5.2"}
+                  GLM · {settings?.glm.model || providerDefaults.glm.model}
                 </option>
                 <option value="minimax">
                   MiniMax · {settings?.minimax.model || "MiniMax-M3"}
@@ -466,6 +468,7 @@ export function Chat() {
         </div>
       </section>
       <aside className="context-panel">
+        <RewritePanel />
         <div className="panel-title">
           <FileText size={16} />
           <h3>本次创作上下文</h3>

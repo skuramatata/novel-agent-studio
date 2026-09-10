@@ -69,6 +69,7 @@ export interface Message {
   model?: string;
 }
 export interface Project {
+  rewrite?: { epoch: string; backupId: string; instruction: string };
   writingSettings?: { wordTolerance: WordTolerance };
   projectId: string;
   schemaVersion: 1;
@@ -258,6 +259,17 @@ export interface ProjectSummary {
   archived: boolean;
 }
 export interface Bridge {
+  rewrite: (
+    id: string,
+    revision: number,
+    instruction: string,
+  ) => Promise<Project>;
+  rewriteBackups: (id: string) => Promise<RewriteBackup[]>;
+  restoreRewrite: (
+    id: string,
+    backupId: string,
+    revision: number,
+  ) => Promise<Project>;
   logs: (id: string, options?: CreationLogOptions) => Promise<CreationLogView>;
   memory: (id: string) => Promise<MemoryView>;
   task: (id: string) => Promise<ChapterTask | null>;
@@ -288,6 +300,15 @@ export interface Bridge {
   cancel: () => Promise<void>;
   export: (id: string, format: "json" | "md") => Promise<boolean>;
   onProgress: (fn: (s: string) => void) => () => void;
+}
+export interface RewriteBackup {
+  id: string;
+  projectId: string;
+  createdAt: string;
+  reason: "rewrite" | "restore";
+  title: string;
+  revision: number;
+  chapters: number;
 }
 export interface CreationLogOptions {
   taskId?: string;

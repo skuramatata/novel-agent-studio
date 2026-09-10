@@ -185,7 +185,7 @@ handle("memory", (id) => serial(async () => memoryView(await store.load(id))));
 handle("logs", (id, options) =>
   serial(async () =>
     readCreationLogs(
-      store.directoryFor(id),
+      await store.runtimeDirectoryFor(id),
       await store.load(id),
       options,
       !!active,
@@ -195,7 +195,9 @@ handle("logs", (id, options) =>
 handle("task", (id) =>
   serial(async () => {
     const p = await store.load(id);
-    const state = await new Checkpoint(store.directoryFor(id)).read();
+    const state = await new Checkpoint(
+      await store.runtimeDirectoryFor(id),
+    ).read();
     if (!state) return null;
     const taskView = reviewTaskState(state, !!active);
     const workspace = draftWorkspaceView(state);
@@ -241,6 +243,13 @@ handle("select", (id) => manage(() => store.select(id)));
 handle("create", (title) => manage(() => store.create(title)));
 handle("rename", (id, title) => manage(() => store.rename(id, title)));
 handle("archive", (id, archived) => manage(() => store.archive(id, archived)));
+handle("rewrite-backups", (id) => serial(() => store.rewriteBackups(id)));
+handle("rewrite", (id, revision, instruction) =>
+  manage(() => store.rewrite(id, revision, instruction)),
+);
+handle("restore-rewrite", (id, backupId, revision) =>
+  manage(() => store.restoreRewrite(id, backupId, revision)),
+);
 handle("save", (p, r) =>
   serial(async () => {
     if (typeof p?.projectId !== "string") throw Error("缺少作品标识");
@@ -272,7 +281,10 @@ handle("save", (p, r) =>
           }
         : m;
     });
-    return store.save({ ...p, messages, memory: old.memory }, r);
+    return store.save(
+      { ...p, messages, memory: old.memory, rewrite: old.rewrite },
+      r,
+    );
   }),
 );
 handle("accept", (projectId, id) =>
@@ -359,7 +371,7 @@ async function executeGenerate(req, controller) {
   let p = await serial(() => store.load(req.projectId));
   if (req.decision) {
     const previous = await new Checkpoint(
-      store.directoryFor(req.projectId),
+      await store.runtimeDirectoryFor(req.projectId),
     ).read();
     // 收讫答复允许携带第一次发送时的 revision；它只返回当前作品，不再执行写作。
     if (
@@ -369,7 +381,7 @@ async function executeGenerate(req, controller) {
     )
       return p;
   }
-  const runDir = store.directoryFor(req.projectId);
+  const runDir = await store.runtimeDirectoryFor(req.projectId);
   const oldTask = await new Checkpoint(runDir).read();
   const repeatAction =
     req.authorAction ||

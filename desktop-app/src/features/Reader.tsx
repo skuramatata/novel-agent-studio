@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useStudio } from "../state/StudioContext";
 import { ChapterGeneration } from "./ChapterGeneration";
+import { RewritePanel } from "./RewritePanel";
 export function Reader() {
   const { project } = useStudio();
   const chapters = [...project!.chapters].sort((a, b) => a.number - b.number);
@@ -27,6 +28,7 @@ export function Reader() {
             {chapters.filter((c) => c.content).length} 章正文
           </p>
         </div>
+        <RewritePanel />
         <button
           className={"outline-button " + (outline ? "active" : "")}
           onClick={() => setOutline(true)}

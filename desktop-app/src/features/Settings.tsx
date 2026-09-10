@@ -110,7 +110,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               setModel(e.target.value);
               setLimits({});
             }}
-            placeholder={selected === "glm" ? "glm-5.2" : "MiniMax-M3"}
+            placeholder={providerDefaults[selected].model}
           />
         </label>
         <label>

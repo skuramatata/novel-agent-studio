@@ -8,6 +8,7 @@ import {
 } from "react";
 import { bridge } from "../lib/bridge";
 import { draftActionSucceeded } from "../lib/draft-feedback";
+import { rewriteInstruction } from "../../runtime/rewrite-plan.mjs";
 import type {
   Project,
   ProjectSummary,
@@ -210,6 +211,20 @@ function useStudioState() {
       }),
     archiveProject: (id: string, archived: boolean) =>
       manage(() => bridge.archive(id, archived)),
+    startRewrite: async (revision: number, instruction: string) => {
+      const id = project?.projectId;
+      if (!id) return false;
+      const reset = await manage(() =>
+        bridge.rewrite(id, revision, instruction),
+      );
+      if (!reset) return false;
+      setNotice("旧稿已自动备份，正在重新规划");
+      return generate(rewriteInstruction(current.current!));
+    },
+    restoreRewrite: (backupId: string, revision: number) =>
+      manage(() =>
+        bridge.restoreRewrite(project!.projectId, backupId, revision),
+      ),
     cancel: () => bridge.cancel(),
   };
 }

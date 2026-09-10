@@ -114,7 +114,7 @@ chmod 600 .env
 
 ```dotenv
 ZAI_CODING_CN_API_KEY=
-MAIN_MODEL=glm-5.2
+MAIN_MODEL=glm-5.3
 MINIMAX_API_KEY=
 ```
 
@@ -169,7 +169,7 @@ desktop-app/release/NovelAgentStudio-darwin-arm64/NovelAgentStudio.app
 
 | 供应商 | 默认模型 | 默认接口 |
 | --- | --- | --- |
-| GLM | `glm-5.2` | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| GLM | `glm-5.3` | `https://open.bigmodel.cn/api/coding/paas/v4` |
 | MiniMax | `MiniMax-M3` | `https://api.minimaxi.com/v1` |
 
 MiniMax 也支持在设置中使用 `https://api.minimax.cn/v1` 或 `https://api.minimax.io/v1`。其适配使用 OpenAI 兼容接口，协议说明见 [MiniMax 官方文档](https://platform.minimaxi.com/docs/api-reference/text-openai-api)。当前没有任意供应商、自定义代理地址或本地生成模型的通用接入界面。
