@@ -1,4 +1,8 @@
-import { REVIEW_POLICY, REVIEW_DIMENSIONS } from "./review-policy.mjs";
+import {
+  REVIEW_POLICY,
+  REVIEW_DIMENSIONS,
+  GENERAL_REVIEW_POLICY,
+} from "./review-policy.mjs";
 import {
   runReviewBatches,
   runLocalTasks,
@@ -623,6 +627,10 @@ function reviewPrompt(continuity = false) {
   return `${REVIEW_PROMPT}\n${continuity ? CONTINUITY_REVIEW_RULES + "\n" : ""}所有字段放在同一个顶层对象内，不在闭合的JSON后追加字段。格式示例（请按实际原文填写）：${JSON.stringify(example)}`;
 }
 
+export function focusedReviewPrompt() {
+  return `${reviewPrompt()}\n本轮是已完成专项后的叙事衔接与要求复核。新问题只检查：动作或剧情因果衔接断裂、把未交代事件当作已经发生、指代歧义、未落实作者明确要求。不要重新全量检查日期计算、物件位置/持有变化、观察证词和推断的支持关系；这些由同一版本正文的专项负责。specialistFindings是已登记的问题，除非有明确新证据，不重复提交。普通文学偏好只可列suggestion，不强制改稿。\n例外：priorFindings中的每个旧问题及authorConstraints中的每条作者裁定仍必须逐项根据当前正文复核，即使涉及专项维度也不得漏项。确认为未解决的问题必须列入issues；被纠正或不成立的旧问题应据实驳回，不因曾被提出就反复要求改写。仍只能引用本批document的真实地址，不新增事件来圆说。`;
+}
+
 function dimensionPrompt(dimension) {
   const allowed = {
     time: [1, 5, 6, 7],
@@ -680,11 +688,14 @@ async function auditContinuityPart({
     state,
     save,
     ask,
-    key: `${key}:${REVIEW_RESULT_VERSION}${dimension ? `:${REVIEW_POLICY}:${dimension.id}` : ""}`,
+    key: `${key}:${REVIEW_RESULT_VERSION}${dimension ? `:${dimension.policy || REVIEW_POLICY}:${dimension.id}` : ""}`,
     stage: "continuity",
     contract: dimension ? dimensionContracts[dimension.id] : specialistContract,
     requestOptions: dimension
-      ? { reasoningEffort: dimension.effort, reviewPolicy: REVIEW_POLICY }
+      ? {
+          reasoningEffort: dimension.effort,
+          reviewPolicy: dimension.policy || REVIEW_POLICY,
+        }
       : {},
     pins: constraints,
     messagesFor: (view) => [
@@ -918,6 +929,7 @@ export async function reviewAndPatch({
           });
           await save();
         }
+        const focused = profile?.highReasoning && !!cycle.continuityReview;
         let value = await runReviewBatches({
           doc,
           profile,
@@ -926,14 +938,31 @@ export async function reviewAndPatch({
           ask,
           pins: [hints, constraints],
           contract: reviewContract,
-          key: `${REVIEW_VERSION}:review:${doc.version}:${digest([hints, constraints])}:${REVIEW_RESULT_VERSION}${retryKey()}`,
+          requestOptions: focused
+            ? { reasoningEffort: "low", reviewPolicy: GENERAL_REVIEW_POLICY }
+            : {},
+          key: `${REVIEW_VERSION}:review:${doc.version}:${digest([hints, constraints])}:${REVIEW_RESULT_VERSION}${focused ? `:${GENERAL_REVIEW_POLICY}` : ""}${retryKey()}`,
           messagesFor: (view) => [
-            { role: "system", content: reviewPrompt() },
+            {
+              role: "system",
+              content: focused ? focusedReviewPrompt() : reviewPrompt(),
+            },
             {
               role: "user",
               content: JSON.stringify({
                 instruction: context.instruction,
                 chapterPlan: context.chapter?.plan,
+                ...(focused
+                  ? {
+                      specialistFindings: modelFindings(
+                        cycle.continuityReview.issues,
+                      ),
+                      specialistDimensions:
+                        cycle.continuityReview.continuityChecks?.map(
+                          (c) => c.dimension,
+                        ),
+                    }
+                  : {}),
                 priorFindings: hints,
                 authorConstraints: constraints,
                 document: modelDocument(view, { explicitSentences: true }),

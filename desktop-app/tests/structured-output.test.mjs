@@ -172,7 +172,7 @@ test("持续截断有明确上限，恢复也不能无限自动扩容或缓存�
   assert.deepEqual(f.state.values, {});
   await assert.rejects(
     f.checkpoint.begin(f.project, { resume: true }, config),
-    /纠错预算已用尽/,
+    /输出预算已用尽/,
   );
   assert.equal(budgets.length, 3);
   assert.equal(Object.keys((await f.checkpoint.read()).fragments).length, 3);

@@ -86,8 +86,12 @@ export function blockedStructuredRecovery(state) {
 
 function exhaustedError(step) {
   const last = step.lastFailure;
+  const reason =
+    last.kind === "output_limit"
+      ? `输出预算已用尽（上限 ${step.outputBudget} Token），已达到当前输出或扩容限制`
+      : "同一输入的纠错预算已用尽";
   const error = Error(
-    `“${step.label}”同一输入的纠错预算已用尽，重复恢复不会再次请求模型。草稿与失败结果已保存，需要调整该批输入或处理协议后继续。最后原因：${last.detail}`,
+    `“${step.label}”${reason}，重复恢复不会再次请求模型。草稿与失败结果已保存，需要调整该批输入或处理协议后继续。最后原因：${last.detail}`,
   );
   error.name =
     last.name === "RepairScopeError"
