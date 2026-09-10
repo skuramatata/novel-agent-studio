@@ -146,7 +146,12 @@ export interface ChapterTask {
     phase: string;
     label: string;
     failure: { kind: string; detail: string; summary: string } | null;
-    issues: { id: string; status: string; explanation: string }[];
+    issues: {
+      id: string;
+      status: string;
+      explanation: string;
+      requiresInstruction?: boolean;
+    }[];
     decisions: number;
   } | null;
   review?: PendingReview | null;
@@ -193,6 +198,11 @@ export interface DraftWorkspaceState {
   canGuide: boolean;
   budget: { epoch: number; used: number; limit: number };
   lastInstruction: string;
+  lastAction?: {
+    id: string;
+    type: DraftAction["type"];
+    changed: boolean;
+  } | null;
   scenes: {
     scene: number;
     sourceId: string;

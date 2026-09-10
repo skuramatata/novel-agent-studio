@@ -326,7 +326,7 @@ export async function runDraftWork({ p, state, ask, save, signal, profile }) {
         authorRequested: true,
         authorInstruction:
           work.instruction ||
-          "修订所选问题，选择更符合文章的版本并统一关联位置。",
+          `根据所选问题的原文证据修订并统一关联位置。问题：${i.explanation}；修改建议：${i.fix || "核对后按最小范围处理"}`,
         ...(work.scope.kind !== "chapter" ? { authorScope: scope } : {}),
       })),
       doc.version,

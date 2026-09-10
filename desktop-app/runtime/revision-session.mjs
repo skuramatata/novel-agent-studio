@@ -66,6 +66,16 @@ export function draftScenes(state) {
 }
 export const draftVersion = (state) => digest(draftScenes(state));
 
+// 模糊作者要求不能伪装成已经定位的正文错误；旧记录也从实际审稿结果派生。
+export function issueNeedsInstruction(issue) {
+  return (
+    issue.status === "awaiting_author" &&
+    !!issue.latest?.authorRequested &&
+    issue.latest?.grounding?.decision === "needs_confirmation" &&
+    !issue.latest?.repairTargets?.length
+  );
+}
+
 // 已变更原文上的旧发现保留在审稿历史，不继续当作当前待处理问题。
 export function currentDraftIssueStatus(state, issue) {
   if (["closed", "verified"].includes(issue.status)) return issue.status;

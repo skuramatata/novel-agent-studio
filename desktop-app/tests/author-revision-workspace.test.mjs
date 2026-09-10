@@ -38,6 +38,156 @@ import { workflowContract } from "../runtime/workflow-skill.mjs";
 import { z } from "zod";
 import ts from "typescript";
 
+test("相同正文的新一轮主动审查重新调用模型，同回合恢复才复用", async (t) => {
+  const f = await fixture(t),
+    m = model();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = await f.checkpoint.read();
+    const state = await f.checkpoint.begin(
+      f.p,
+      {
+        instruction: "继续自动修改",
+        authorAction: action(before, "continue"),
+      },
+      config,
+    );
+    const result = await run(f, state, m.fetcher);
+    assert.ok(result.proposal);
+    assert.equal(state.values["final-scene:0"], original);
+    assert.equal(m.calls.length, attempt + 1, "主动审查不能返回上一轮缓存");
+    await run(f, state, m.fetcher);
+    assert.equal(m.calls.length, attempt + 1, "同回合恢复不重复调用");
+  }
+});
+
+test("继续自动修改携带所选问题时进入所选问题的补丁与复核链", async (t) => {
+  const f = await fixture(t),
+    m = model();
+  const tracked = trackFindings(
+    f.state,
+    issuesFor(f.state),
+    reviewDocument(draftScenes(f.state), {}).version,
+  );
+  await f.checkpoint.write(f.state);
+  const state = await f.checkpoint.begin(
+    f.p,
+    {
+      instruction: "",
+      authorAction: action(f.state, "continue", {
+        issueIds: [tracked[0].ledgerId],
+      }),
+    },
+    config,
+  );
+  const result = await run(f, state, m.fetcher);
+  assert.ok(result.proposal);
+  assert.deepEqual(m.calls, ["grounding", "patch", "verification", "review"]);
+  assert.equal(
+    state.values["final-scene:0"],
+    original.replace("她仍攥着毛毯。", changed),
+  );
+  assert.equal(
+    state.authorDirections?.length || 0,
+    0,
+    "按钮标题不写入作者要求",
+  );
+});
+
+test("要求不明的旧问题先提示补充，明确要求后可完成修订，失败前不消耗回合", async (t) => {
+  const f = await fixture(t),
+    m = model();
+  const tracked = trackFindings(
+    f.state,
+    issuesFor(f.state),
+    reviewDocument(draftScenes(f.state), {}).version,
+  );
+  const issue = f.state.reviewWorkflow.issues[0];
+  issue.status = "awaiting_author";
+  Object.assign(issue.latest, {
+    authorRequested: true,
+    grounding: { decision: "needs_confirmation" },
+    repairTargets: [],
+  });
+  await f.checkpoint.write(f.state);
+  const before = structuredClone(f.state);
+  const request = action(f.state, "revise", {
+    issueIds: [tracked[0].ledgerId],
+  });
+  assert.throws(
+    () => prepareDraftAction(f.state, request, ""),
+    /补充具体修改要求/,
+  );
+  assert.deepEqual(f.state, before);
+  const state = await f.checkpoint.begin(
+    f.p,
+    {
+      instruction: "毛毯已交出，把仍攥着毛毯改为空手动作，其他情节保持",
+      authorAction: request,
+    },
+    config,
+  );
+  const result = await run(f, state, m.fetcher);
+  assert.ok(result.proposal);
+  assert.equal(
+    state.values["final-scene:0"],
+    original.replace("她仍攥着毛毯。", changed),
+  );
+  assert.ok(
+    !state.reviewWorkflow.issues.some((i) => i.status === "awaiting_author"),
+  );
+});
+
+test("草稿操作反馈区分正文不变、版本恢复、等待回答和失败", async () => {
+  const source = await readFile(
+    new URL("../src/lib/draft-feedback.ts", import.meta.url),
+    "utf8",
+  );
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ESNext },
+  }).outputText;
+  const { draftFeedback, draftActionSucceeded } = await import(
+    "data:text/javascript;base64," + Buffer.from(js).toString("base64")
+  );
+  const task = {
+    status: "completed",
+    workspace: {
+      canGuide: true,
+      lastAction: { type: "continue", changed: false },
+    },
+  };
+  assert.match(draftFeedback(task).text, /本次正文没有变化/);
+  task.workspace.lastAction = { type: "restore", changed: true };
+  assert.match(draftFeedback(task).text, /已恢复所选版本/);
+  task.status = "awaiting_input";
+  assert.equal(draftFeedback(task).kind, "attention");
+  task.status = "failed";
+  task.error = "网络中断";
+  assert.match(draftFeedback(task).text, /网络中断/);
+  const operation = { taskId: "task", type: "revise" };
+  for (const status of [
+    "awaiting_input",
+    "retryable",
+    "failed",
+    "interrupted",
+    "awaiting_instruction",
+  ])
+    assert.equal(
+      draftActionSucceeded({ id: "task", status }, operation),
+      false,
+    );
+  assert.equal(
+    draftActionSucceeded({ id: "task", status: "completed" }, operation),
+    true,
+  );
+  assert.equal(
+    draftActionSucceeded(
+      { id: "task", status: "awaiting_instruction" },
+      { ...operation, type: "restore" },
+    ),
+    true,
+  );
+});
+
 test("重生成使整章字数越界时有限重试，保留原稿且不进入复核", async (t) => {
   const f = await fixture(t),
     m = model();

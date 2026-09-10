@@ -212,6 +212,56 @@ test("取消信号终止调用，不能返回候选", async () => {
     ),
   );
 });
+test("创作不创建自动超时信号，直接传递取消信号且支持未传入信号", async (t) => {
+  const deadline = t.mock.method(AbortSignal, "timeout", () => {
+    throw Error("创作不应设置计时中断");
+  });
+  for (const signal of [new AbortController().signal, undefined]) {
+    const result = await runAgent(
+      blankProject(),
+      "生成规划",
+      config,
+      signal,
+      () => {},
+      async (_url, init) => {
+        assert.ok(init.signal instanceof AbortSignal);
+        assert.equal(init.signal.aborted, false);
+        if (signal) assert.equal(init.signal, signal);
+        return response(JSON.stringify(demoProposal()));
+      },
+    );
+    assert.equal(result.proposal.premise.title, "潮声之外");
+  }
+  assert.equal(deadline.mock.callCount(), 0);
+});
+test("取消正在等待的模型请求立即中断，不能返回候选", async () => {
+  const control = new AbortController();
+  let entered;
+  const called = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const running = runAgent(
+    blankProject(),
+    "生成规划",
+    config,
+    control.signal,
+    () => {},
+    (_url, init) => {
+      entered();
+      return new Promise((_resolve, reject) =>
+        init.signal.addEventListener(
+          "abort",
+          () => reject(init.signal.reason),
+          { once: true },
+        ),
+      );
+    },
+  );
+  const stopped = assert.rejects(running, { name: "AbortError" });
+  await called;
+  control.abort();
+  await stopped;
+});
 test("MiniMax M3关闭思考，M2不传不支持的关闭参数", async () => {
   for (const model of ["MiniMax-M3", "MiniMax-M2.7"]) {
     let body;

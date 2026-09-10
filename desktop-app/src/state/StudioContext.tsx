@@ -7,12 +7,14 @@ import {
   type ReactNode,
 } from "react";
 import { bridge } from "../lib/bridge";
+import { draftActionSucceeded } from "../lib/draft-feedback";
 import type {
   Project,
   ProjectSummary,
   Provider,
   Settings,
   GenerationOptions,
+  DraftAction,
 } from "../lib/types";
 function useStudioState() {
   const [project, setProject] = useState<Project | null>(null);
@@ -25,6 +27,7 @@ function useStudioState() {
       : "glm",
   );
   const [busy, setBusy] = useState(false);
+  const [draftAction, setDraftAction] = useState<DraftAction | null>(null);
   const running = useRef(false);
   const [switching, setSwitching] = useState(false);
   const changing = useRef(false);
@@ -107,6 +110,7 @@ function useStudioState() {
     if (running.current || changing.current) return false;
     const id = project?.projectId;
     running.current = true;
+    setDraftAction(options.authorAction || null);
     setBusy(true);
     setError("");
     try {
@@ -128,11 +132,14 @@ function useStudioState() {
         revision: p.revision,
       });
       // 保存/采纳与结果回填共用队列，避免旧版本覆盖刚刚保存的状态。
-      return await enqueue(async () => {
+      const synced = await enqueue(async () => {
         if (current.current?.projectId === id)
           put(await bridge.load(result.projectId));
         await list();
       });
+      // IPC 正常返回也可能只是保存了待答/失败状态，不能把输入当成已完成而清空。
+      if (!synced || !options.authorAction) return synced;
+      return draftActionSucceeded(await bridge.task(id!), options.authorAction);
     } catch (e) {
       const message = (e as Error).message;
       // 生成失败前也可能已保存作者答复；先同步版本，再开放恢复入口。
@@ -182,6 +189,7 @@ function useStudioState() {
     provider,
     setProvider,
     busy,
+    draftAction,
     switching,
     progress,
     error,

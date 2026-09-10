@@ -33,7 +33,6 @@ import {
   factReviewMessages,
 } from "./writing.mjs";
 export const PROMPT_VERSION = "novel-studio-3-horror";
-export const RUN_TIMEOUT_MS = 15 * 60 * 1000;
 export const MAX_CALLS = 26;
 const proposalContract = workflowContract(
   "proposal",
@@ -85,9 +84,8 @@ export async function runAgent(
   )
     throw new Error("请输入 1—12000 字的创作请求。");
   signal?.throwIfAborted();
-  signal = signal
-    ? AbortSignal.any([signal, AbortSignal.timeout(RUN_TIMEOUT_MS)])
-    : AbortSignal.timeout(RUN_TIMEOUT_MS);
+  // 创作耗时随场景和审稿批次增长；只响应调用方取消，不设置总时长上限。
+  signal ??= new AbortController().signal;
   if (readyForChapter(project))
     return runWritingTask(
       project,

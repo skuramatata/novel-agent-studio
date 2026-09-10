@@ -2151,6 +2151,35 @@ select:focus {
   border: 1px solid var(--line);
   border-radius: 8px;
 }
+.draft-issue-status {
+  display: inline-block;
+  margin-left: 8px;
+}
+.draft-feedback {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 12px;
+  margin-top: 14px;
+  border: 1px solid var(--accent);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 -3px 12px var(--bg);
+  font-size: 13px;
+}
+.draft-feedback span {
+  flex: 1 1 260px;
+  white-space: pre-wrap;
+}
+.draft-feedback.attention,
+.draft-feedback.error {
+  border-style: dashed;
+}
 @media (max-width: 800px) {
   .draft-comparison {
     grid-template-columns: minmax(0, 1fr);

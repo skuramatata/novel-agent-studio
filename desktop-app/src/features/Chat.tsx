@@ -188,6 +188,7 @@ export function Chat() {
     settings,
     busy,
     progress,
+    draftAction,
     generate,
     cancel,
   } = useStudio();
@@ -195,8 +196,15 @@ export function Chat() {
   const [inputTarget, setInputTarget] = useState<"draft" | "new">("draft");
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (draftAction && draftAction.taskId === reviewChat.task?.id) return;
     end.current?.scrollIntoView({ behavior: "smooth" });
-  }, [project?.messages.length, busy, reviewChat.questionId]);
+  }, [
+    project?.messages.length,
+    busy,
+    reviewChat.questionId,
+    draftAction?.taskId,
+    reviewChat.task?.id,
+  ]);
   async function submit() {
     if (
       !input.trim() ||
@@ -282,7 +290,11 @@ export function Chat() {
             </div>
           ) : (
             project!.messages.map((m) => (
-              <article key={m.id} className={"message " + m.role}>
+              <article
+                key={m.id}
+                id={`candidate-${m.id}`}
+                className={"message " + m.role}
+              >
                 <div className="message-avatar">
                   {m.role === "user" ? "你" : <Feather size={16} />}
                 </div>

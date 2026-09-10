@@ -44,7 +44,7 @@ import {
   addRecoveryMessage,
 } from "../runtime/review-workflow.mjs";
 import { memoryView } from "../runtime/memory.mjs";
-import { runAgent, RUN_TIMEOUT_MS } from "../runtime/agent.mjs";
+import { runAgent } from "../runtime/agent.mjs";
 import { applyProposal, projectSchema } from "../runtime/schema.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const buildInfo = JSON.parse(
@@ -399,10 +399,8 @@ async function executeGenerate(req, controller) {
     )
   )
     throw new Error("请先采纳或放弃其他任务的方案。");
-  const signal = AbortSignal.any([
-    controller.signal,
-    AbortSignal.timeout(RUN_TIMEOUT_MS),
-  ]);
+  // 长篇创作和分批审稿不自动超时，由作者点击停止或关闭窗口取消。
+  const signal = controller.signal;
   const started = Date.now();
   const runId = crypto.randomUUID();
   const record = async (details) => {
@@ -657,22 +655,13 @@ async function executeGenerate(req, controller) {
       await checkpoint.write(checkpointState);
     }
     await record({
-      status: signal.aborted
-        ? controller.signal.aborted
-          ? "cancelled"
-          : "timeout"
-        : "failed",
+      status: signal.aborted ? "cancelled" : "failed",
       error: signal.aborted ? "任务中断" : e.message,
       calls: e.details?.calls ?? null,
       usages: e.details?.usages ?? null,
       diagnostics: e.details ?? null,
     });
-    if (signal.aborted)
-      throw new Error(
-        controller.signal.aborted
-          ? "任务已停止，作品未改变。"
-          : "任务超时，作品未改变。",
-      );
+    if (signal.aborted) throw new Error("任务已停止，作品未改变。");
     throw e;
   }
 }

@@ -69,7 +69,7 @@ export function ChapterGeneration({ chapter }: { chapter: Chapter }) {
       )}
       {pending && !candidate && <p>请先在创作对话处理上一份候选。</p>}
       {candidate && pending && (
-        <div>
+        <div id={`candidate-${pending.id}`}>
           <details>
             <summary>查看本章候选正文</summary>
             <div className="prose">{candidate.content}</div>

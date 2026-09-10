@@ -123,16 +123,19 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     ]);
     const resultOwner = state.structuredResults?.[key];
     const previousStep = state.structuredSteps?.[resultOwner];
-    const reusableAcrossRounds = ![
-      "patch",
-      "verification",
-      "author_revision",
-      "author_verification",
-    ].includes(contract.id);
+    const reusableAcrossRounds =
+      !authorStages.has(contract.id) &&
+      ![
+        "patch",
+        "verification",
+        "author_revision",
+        "author_verification",
+      ].includes(contract.id);
     // 旧缓存沿原检查点契约校验；新结果必须属于相同输入节点。
     if (
       Object.hasOwn(state.values, key) &&
-      (!resultOwner ||
+      ((!resultOwner &&
+        (reusableAcrossRounds || revisionBudget(state).epoch === 0)) ||
         resultOwner === id ||
         (reusableAcrossRounds &&
           previousStep?.status === "succeeded" &&

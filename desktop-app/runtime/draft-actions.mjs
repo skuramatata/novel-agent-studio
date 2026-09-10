@@ -14,6 +14,8 @@ import {
   setDraftScenes,
   recordDraftVersion,
   revisionBudget,
+  currentDraftIssueStatus,
+  issueNeedsInstruction,
 } from "./revision-session.mjs";
 
 const scopeSchema = z
@@ -114,12 +116,26 @@ export function prepareDraftAction(state, raw, instruction) {
   const selected = (action.issueIds || []).map((id) => {
     const issue = state.reviewWorkflow?.issues.find((i) => i.id === id);
     if (!issue?.latest) throw Error("所选问题不存在，请重新载入审稿记录。");
+    if (
+      ["closed", "verified", "stale"].includes(
+        currentDraftIssueStatus(state, issue),
+      )
+    )
+      throw Error("所选问题已处理或原文已变化，请重新选择当前问题。");
     return issue;
   });
   if (action.type === "keep" && !selected.length)
     throw Error("请先选择要保留原文的问题。");
   if (action.type === "revise" && !instruction.trim() && !selected.length)
     throw Error("请输入修改要求或选择问题。");
+  if (
+    ["revise", "continue"].includes(action.type) &&
+    selected.some(issueNeedsInstruction) &&
+    !instruction.trim()
+  )
+    throw Error(
+      "所选问题中有尚未说明怎么改的作者要求，请补充具体修改要求，或选择保留原文。",
+    );
   let replacement;
   if (action.type === "edit")
     replacement = replaceDraftScope(scenes, scope, action.text || "");
@@ -163,6 +179,7 @@ export function prepareDraftAction(state, raw, instruction) {
   const previousWork = state.draftWork;
   const continuing =
     action.type === "continue" &&
+    !selected.length &&
     previousWork &&
     previousWork.status !== "done" &&
     !state.pendingReview;
@@ -239,6 +256,10 @@ export function prepareDraftAction(state, raw, instruction) {
     ? { ...previousWork, id: action.id, attempt: 0 }
     : {
         ...action,
+        type:
+          action.type === "continue" && selected.length
+            ? "revise"
+            : action.type,
         scope,
         instruction,
         selectedIssues: selected.map((i) => structuredClone(i.latest)),
@@ -291,5 +312,14 @@ export function draftWorkspaceView(state) {
       limit: revisionBudget(state).limit,
     },
     lastInstruction: state.draftWork?.instruction || "",
+    lastAction: state.authorActions?.length
+      ? {
+          id: state.authorActions.at(-1).id,
+          type: state.authorActions.at(-1).action.type,
+          changed:
+            state.authorActions.at(-1).action.draftVersion !==
+            draftVersion(state),
+        }
+      : null,
   };
 }

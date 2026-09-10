@@ -1,6 +1,9 @@
 import { digest } from "./memory.mjs";
 import { blockedStructuredRecovery } from "./structured-step.mjs";
-import { currentDraftIssueStatus } from "./revision-session.mjs";
+import {
+  currentDraftIssueStatus,
+  issueNeedsInstruction,
+} from "./revision-session.mjs";
 
 const labels = {
   review: "核对审稿发现",
@@ -616,6 +619,7 @@ export function reviewTaskState(state, active = false) {
             id: i.id,
             status: currentDraftIssueStatus(state, i),
             explanation: i.latest?.explanation || "",
+            requiresInstruction: issueNeedsInstruction(i),
           })),
           decisions: w.constraints.length,
         }
