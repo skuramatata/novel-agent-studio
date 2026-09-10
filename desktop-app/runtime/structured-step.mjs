@@ -1,3 +1,4 @@
+import { canMigrateMemoryExtraction } from "./memory-extraction-policy.mjs";
 import {
   initialOutput,
   observeReasoning,
@@ -43,7 +44,8 @@ const authorStages = new Set([
 export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
   const step = state.structuredSteps?.[failure?.stepId];
-  if (canUpgradeOutput(state, step)) return null;
+  if (canUpgradeOutput(state, step) || canMigrateMemoryExtraction(state, step))
+    return null;
   if (
     ["review", "continuity_review"].includes(step?.contractId) &&
     /分批/.test(step.label || "") &&
@@ -104,6 +106,8 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     signal?.throwIfAborted();
     const contract = options.contract;
     assertWorkflowStage(state, contract);
+    const outputScope =
+      options.reasoningEffort === "low" ? `${contract.id}:low` : contract.id;
     messages = workflowMessages(messages, contract);
     const authorProtocol = authorIdProtocol(messages);
     messages = authorProtocol.messages;
@@ -164,6 +168,9 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       status: "pending",
       input: structuredClone(baseMessages),
       contractId: contract.id,
+      ...(options.memoryExtractionPolicy
+        ? { memoryExtractionPolicy: options.memoryExtractionPolicy }
+        : {}),
       ...(["review", "continuity_review"].includes(contract.id)
         ? { reviewBatchProtocol: REVIEW_BATCH_PROTOCOL }
         : {}),
@@ -179,7 +186,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       expansions: 0,
       calls: 0,
       maxCorrections: options.maxCorrections === 2 ? 2 : 1,
-      outputBudget: initialOutput(tokens, budget, contract.id),
+      outputBudget: initialOutput(tokens, budget, outputScope),
       ...(budget.highReasoning ? { outputPolicy: OUTPUT_POLICY } : {}),
     });
     if (step.status === "succeeded") {
@@ -235,7 +242,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     tokens = requestOutput(
       Math.max(
         step.outputBudget,
-        initialOutput(tokens, budget, contract.id),
+        initialOutput(tokens, budget, outputScope),
         Number.isSafeInteger(previous) && previous <= MAX_STRUCTURED_OUTPUT
           ? previous
           : 0,
@@ -274,8 +281,10 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         step.outputBudget = tokens;
         await save();
         // 网络中断保留本次纠错输入；不刷新格式纠错预算。
-        const response = await call(messages, tokens, label, true);
-        observeReasoning(budget, contract.id, response.usage);
+        const response = await call(messages, tokens, label, true, {
+          reasoningEffort: options.reasoningEffort,
+        });
+        observeReasoning(budget, outputScope, response.usage);
         step.calls++;
         const rawKey = `raw:${key}:step-${id.slice(0, 12)}:${step.calls}`;
         state.fragments[rawKey] = response.text;

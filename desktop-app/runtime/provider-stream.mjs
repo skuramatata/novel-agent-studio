@@ -98,8 +98,8 @@ export function createStreamProgress(emit = () => {}) {
     const quiet = Math.floor((now - lastData) / 1000);
     emit(
       `${phase} · 本次请求 ${Math.floor((now - started) / 1000)} 秒` +
-        (reasoningChars ? ` · 思考已接收 ${reasoningChars} 字` : "") +
-        (contentChars ? ` · 内容已接收 ${contentChars} 字` : "") +
+        (reasoningChars ? ` · 思考已接收 ${reasoningChars} 字符` : "") +
+        (contentChars ? ` · 内容已接收 ${contentChars} 字符` : "") +
         (quiet >= 15 ? ` · ${quiet} 秒未收到新内容` : ""),
     );
   };

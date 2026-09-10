@@ -138,7 +138,8 @@ async function requestCompletion(
           : /^glm-5\.3$/i.test(config.model)
             ? {
                 thinking: { type: "enabled" },
-                reasoning_effort: "high",
+                reasoning_effort:
+                  options.reasoningEffort === "low" ? "low" : "high",
               }
             : {
                 thinking: { type: options.reasoning ? "enabled" : "disabled" },

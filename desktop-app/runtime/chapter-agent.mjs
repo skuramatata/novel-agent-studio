@@ -1,4 +1,8 @@
-import { initialOutput, observeReasoning } from "./reasoning-budget.mjs";
+import {
+  initialOutput,
+  observeReasoning,
+  usesHighReasoning,
+} from "./reasoning-budget.mjs";
 import { fitWritingContext } from "./context-budget.mjs";
 import { z } from "zod";
 import { complete } from "./providers.mjs";
@@ -74,7 +78,7 @@ export async function runChapterAgent(
 ) {
   // 已在执行的旧检查点保持原证据地址与恢复链；新任务启用连续性专项。
   const continuity = state.continuityVersion === 1;
-  const extractionOptions = { continuity };
+  const extractionOptions = { continuity, compact: usesHighReasoning(config) };
   const save = async () => {
     state.updatedAt = new Date().toISOString();
     await checkpoint.write(state);
@@ -88,6 +92,7 @@ export async function runChapterAgent(
     label,
     partial = false,
     structured = false,
+    providerOptions = {},
   ) {
     if (!partial) messages = proseWorkflowMessages(messages);
     tokens = structured
@@ -115,6 +120,9 @@ export async function runChapterAgent(
       details: {
         调用序号: state.calls,
         输出预算: tokens,
+        ...(usesHighReasoning(config)
+          ? { 思考强度: providerOptions.reasoningEffort || "high" }
+          : {}),
         输入估算: inputEstimate,
         有效上下文: budget.capabilities.contextLimit,
         模型输出上限: budget.capabilities.maxOutputTokens,
@@ -140,6 +148,7 @@ export async function runChapterAgent(
     let result;
     try {
       result = await complete(config, messages, signal, fetcher, tokens, {
+        ...providerOptions,
         allowPartial: partial,
         onProgress: (detail) => progress(`${label} · ${detail}`),
       });
@@ -182,8 +191,8 @@ export async function runChapterAgent(
     save,
     signal,
     // 结构化步骤已计算总额度；正文的部分输出选项不影响思考预算。
-    call: (messages, tokens, label, partial) =>
-      call(messages, tokens, label, partial, true),
+    call: (messages, tokens, label, partial, providerOptions) =>
+      call(messages, tokens, label, partial, true, providerOptions),
   });
   try {
     const req = state.request;

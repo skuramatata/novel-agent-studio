@@ -6,6 +6,11 @@ export const usesHighReasoning = (config = {}) =>
 export function initialOutput(desired, profile, scope = "general") {
   if (!profile?.highReasoning) return requestOutput(desired, profile);
   const observed = profile.reasoningPeaks?.[scope] || 0;
+  if (scope === "memory_extract:low")
+    return requestOutput(
+      Math.min(24000, Math.max(12000, desired + Math.ceil(observed * 1.25))),
+      profile,
+    );
   const reserve = Math.max(12000, Math.ceil(observed * 1.25));
   return requestOutput(
     Math.max(desired, Math.min(24000, Math.max(16000, desired + reserve))),
