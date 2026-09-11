@@ -1,3 +1,4 @@
+import { planScenes } from "./scene-planning.mjs";
 import {
   initialOutput,
   observeReasoning,
@@ -469,9 +470,13 @@ export async function runChapterAgent(
           }
         : {}),
     };
-    const plan = await ask(
-      "scene-plan",
-      [
+    const plan = await planScenes({
+      state,
+      ask,
+      save,
+      count,
+      contract: scenesContract,
+      messages: [
         {
           role: "system",
           content: `${WRITING_RULES}\n为当前章设计恰好${count}个连续场景。每个场景有行动、阻力、选择、后果，并遵守知情边界。只输出JSON：${JSON.stringify({ scenes: [sceneShape] })}。${continuity ? "每个场景必须填写time全部四项，按已知时间锚点推进，不得漏填。未定绝对日期时使用相对时间，不补造年份或历法；回忆分别标明事件时间和叙述时间。" : ""}不得复制尚未揭示的秘密。章纲只是计划。回顾已写事件须依据历史原文，不能补造过去对白；人物背景往事可以按已采纳章纲与人物设定展开，不要求此前已有正文。缺少关键依据且无法保守处理时报告具体句子、冲突依据与可执行取舍，不因出现“回忆、当年”就要求作者指定章节。`,
@@ -491,7 +496,7 @@ export async function runChapterAgent(
           }),
         },
       ],
-      (v) => {
+      validate: (v) => {
         const result = scenesSchema.parse(v);
         if (result.scenes.length !== count)
           throw Error(`必须规划${count}个场景`);
@@ -501,10 +506,7 @@ export async function runChapterAgent(
           );
         return result;
       },
-      5000,
-      "规划本章场景",
-      { contract: scenesContract },
-    );
+    });
     const budgets = plan.scenes.map(
       (_, i) => Math.floor(words / count) + (i < words % count ? 1 : 0),
     );

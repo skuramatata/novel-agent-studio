@@ -6,11 +6,7 @@ export const usesHighReasoning = (config = {}) =>
 export function initialOutput(desired, profile, scope = "general") {
   if (!profile?.highReasoning) return requestOutput(desired, profile);
   const observed = profile.reasoningPeaks?.[scope] || 0;
-  if (
-    ["memory_extract:low", "continuity_review:low", "review:low"].includes(
-      scope,
-    )
-  )
+  if (scope.endsWith(":low"))
     return requestOutput(
       Math.min(24000, Math.max(12000, desired + Math.ceil(observed * 1.25))),
       profile,
@@ -37,5 +33,18 @@ export function canUpgradeOutput(state, step) {
     step.lastFailure?.kind === "output_limit" &&
     !step.outputPolicy &&
     step.outputBudget < 24000
+  );
+}
+
+// 必须有供应商用量证据；缺少用量不能把长答案误判成思考耗尽。
+export function reasoningExhausted(response) {
+  const total = response.usage?.completion_tokens;
+  const reasoning = response.usage?.completion_tokens_details?.reasoning_tokens;
+  return (
+    response.finishReason === "length" &&
+    Number.isSafeInteger(total) &&
+    total > 0 &&
+    Number.isSafeInteger(reasoning) &&
+    reasoning / total >= 0.8
   );
 }

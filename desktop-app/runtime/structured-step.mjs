@@ -1,7 +1,9 @@
+import { canMigrateScenePlanning } from "./scene-planning.mjs";
 import { canMigrateReview, REVIEW_EFFORTS } from "./review-policy.mjs";
 import { canMigrateMemoryExtraction } from "./memory-extraction-policy.mjs";
 import {
   initialOutput,
+  reasoningExhausted,
   observeReasoning,
   canUpgradeOutput,
   OUTPUT_POLICY,
@@ -46,6 +48,7 @@ export function blockedStructuredRecovery(state) {
   const failure = state.structuredFailure;
   const step = state.structuredSteps?.[failure?.stepId];
   if (
+    canMigrateScenePlanning(state, step) ||
     canUpgradeOutput(state, step) ||
     canMigrateMemoryExtraction(state, step) ||
     canMigrateReview(state, step)
@@ -99,6 +102,7 @@ function exhaustedError(step) {
       : "StructuredRecoveryExhausted";
   error.code = "STRUCTURED_RECOVERY_EXHAUSTED";
   error.targets = last.targets;
+  error.reasoningExhausted = last.reasoningExhausted === true;
   return error;
 }
 
@@ -120,7 +124,7 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         ...options,
         reasoningEffort: options.reasoningEffort || REVIEW_EFFORTS[contract.id],
       };
-    const outputScope =
+    let outputScope =
       options.reasoningEffort === "low" ? `${contract.id}:low` : contract.id;
     messages = workflowMessages(messages, contract);
     const authorProtocol = authorIdProtocol(messages);
@@ -182,6 +186,10 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       status: "pending",
       input: structuredClone(baseMessages),
       contractId: contract.id,
+      logicalKey: stableKey,
+      ...(options.reasoningPolicy
+        ? { reasoningPolicy: options.reasoningPolicy }
+        : {}),
       ...(options.reviewPolicy ? { reviewPolicy: options.reviewPolicy } : {}),
       ...(options.memoryExtractionPolicy
         ? { memoryExtractionPolicy: options.memoryExtractionPolicy }
@@ -204,6 +212,10 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       outputBudget: initialOutput(tokens, budget, outputScope),
       ...(budget.highReasoning ? { outputPolicy: OUTPUT_POLICY } : {}),
     });
+    if (step.reasoningEffort === "low") {
+      options = { ...options, reasoningEffort: "low" };
+      outputScope = `${contract.id}:low`;
+    }
     if (step.status === "succeeded") {
       const value = validateResponse(
         parseStructured(state.fragments[step.rawKey]),
@@ -251,7 +263,11 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
     if (step.status === "exhausted") return stop();
     // 只有输入/协议确实变化并进入另一个步骤，才建立新的执行预算。
     if (state.structuredFailure?.stepId !== id) delete state.structuredFailure;
-    const budgetKey = digest([budget.key, baseMessages]);
+    const budgetKey = digest([
+      budget.key,
+      baseMessages,
+      ...(options.reasoningEffort === "low" ? [outputScope] : []),
+    ]);
     state.outputBudgets ??= {};
     const previous = state.outputBudgets[budgetKey];
     tokens = requestOutput(
@@ -309,6 +325,9 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
           usage: response.usage,
           model: response.model,
           outputBudget: tokens,
+          reasoningEffort:
+            options.reasoningEffort ||
+            (budget.highReasoning ? "high" : undefined),
           stepId: id,
         };
         step.rawKey = step.pendingRaw = rawKey;
@@ -327,8 +346,38 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
           kind: "output_limit",
           name: "OutputLimit",
           rawKey,
-          detail: `输出达到${tokens}额度，响应尚未完成。`,
+          detail:
+            budget.highReasoning && reasoningExhausted(response)
+              ? `思考占本次输出至少80%，总输出达到${tokens} Token；不再原样增加预算。`
+              : `输出达到${tokens}额度，响应尚未完成。`,
+          reasoningExhausted:
+            budget.highReasoning && reasoningExhausted(response),
         };
+        if (step.lastFailure.reasoningExhausted) {
+          // 高强度只允许一次轻量恢复；低强度仍耗尽交给阶段拆分，不能原样扩容。
+          if (
+            !budget.highReasoning ||
+            options.reasoningEffort === "low" ||
+            step.reasoningFallback
+          )
+            return stop();
+          step.reasoningFallback = true;
+          step.reasoningEffort = "low";
+          options = { ...options, reasoningEffort: "low" };
+          outputScope = `${contract.id}:low`;
+          appendCreationEvent(state, {
+            category: stageCategory(label),
+            status: "waiting",
+            title: `${label} · 思考耗尽，改用轻量推理重试一次`,
+            details: {
+              输出预算: tokens,
+              思考强度: "low",
+              说明: "保留事实输入与校验，不增加输出上限",
+            },
+          });
+          await save();
+          continue;
+        }
         const selected = fitWritingContext(messages, tokens, budget);
         const next = largerStructuredOutput(selected.messages, tokens, budget);
         if (step.expansions >= 2 || next <= tokens) return stop();
