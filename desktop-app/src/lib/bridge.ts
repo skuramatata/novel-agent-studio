@@ -68,6 +68,7 @@ const preview: Bridge = {
     throw Error("恢复重写备份请在桌面端操作。");
   },
   logs: async () => ({
+    flow: { nodes: [], edges: [], total: 0 },
     tasks: [],
     selected: null,
     events: [],
@@ -78,6 +79,9 @@ const preview: Bridge = {
     hasOlderTasks: false,
     warnings: ["浏览器预览不执行真实创作任务，创作日志请在桌面端查看。"],
   }),
+  logNode: async () => {
+    throw Error("节点详情请在桌面端查看。");
+  },
   memory: async (id) => {
     const p = load(id);
     return {

@@ -33,6 +33,11 @@ import { continuationTask } from "./continuation.mjs";
 import { sceneLengthMessages, lengthDistance } from "./scene-length.mjs";
 import { DEFAULT_WORD_TOLERANCE, wordToleranceLabel } from "./word-range.mjs";
 import { appendCreationEvent, stageCategory } from "./creation-log.mjs";
+import {
+  beginModelRecord,
+  recordModelAcceptance,
+  traceOperation,
+} from "./execution-log.mjs";
 import { sceneTimeSchema } from "./continuity-schema.mjs";
 import { retrieveContinuitySources, continuityLedger } from "./continuity.mjs";
 import { runDraftWork } from "./draft-agent.mjs";
@@ -96,6 +101,7 @@ export async function runChapterAgent(
     providerOptions = {},
   ) {
     if (!partial) messages = proseWorkflowMessages(messages);
+    const nodeInput = messages;
     tokens = structured
       ? requestOutput(tokens, budget)
       : initialOutput(tokens, budget, "prose");
@@ -112,6 +118,12 @@ export async function runChapterAgent(
       throw Error("本次达到90次调用预算，已保存进度，可继续恢复。");
     state.stage = label;
     state.calls++;
+    const record = beginModelRecord(state, {
+      label,
+      input: nodeInput,
+      stepId: providerOptions.traceStepId,
+      outputKey: providerOptions.traceOutputKey,
+    });
     const started = Date.now();
     const category = stageCategory(label);
     appendCreationEvent(state, {
@@ -152,8 +164,23 @@ export async function runChapterAgent(
         ...providerOptions,
         allowPartial: partial,
         onProgress: (detail) => progress(`${label} · ${detail}`),
+        onRequest: async (request) => {
+          record.request = request;
+          await save();
+        },
+        onResponse: async ({ text, partial: incomplete, ...meta }) => {
+          record.rawOutput = text;
+          record.responseMeta = meta;
+          record.partial = !!incomplete;
+          record.status = "received";
+          record.endedAt = new Date().toISOString();
+          await save();
+        },
       });
     } catch (e) {
+      record.status = signal.aborted ? "interrupted" : "failed";
+      record.error = e.message;
+      record.endedAt = new Date().toISOString();
       appendCreationEvent(state, {
         category,
         status: signal.aborted ? "waiting" : "failed",
@@ -184,7 +211,7 @@ export async function runChapterAgent(
     });
     await save();
     signal.throwIfAborted();
-    return result;
+    return { ...result, traceCallId: record.id };
   }
   const ask = createStructuredAsker({
     state,
@@ -226,10 +253,16 @@ export async function runChapterAgent(
       }
       state.status = "ready";
       if (services.retrieval) {
-        state.retrievalIndex = await services.retrieval.sync(p, {
-          signal,
-          progress,
-        });
+        state.retrievalIndex = await traceOperation(
+          state,
+          {
+            key: "index",
+            label: "更新本地检索索引",
+            input: { chapterIds: targets.map((ch) => ch.id) },
+          },
+          () => services.retrieval.sync(p, { signal, progress }),
+          save,
+        );
         appendCreationEvent(state, {
           category: "memory",
           status: "success",
@@ -399,22 +432,45 @@ export async function runChapterAgent(
       services.retrieval &&
       !state.retrievedContext
     ) {
-      state.retrievalIndex = await services.retrieval.sync(p, {
-        signal,
-        progress,
-      });
-      state.retrievedContext = await services.retrieval.search(
-        p,
-        ch.number,
-        req.instruction + "\n" + ch.summary,
+      state.retrievalIndex = await traceOperation(
+        state,
         {
-          signal,
-          profile: budget,
-          maxTokens: Math.min(
-            6000,
-            Math.floor(inputLimit(budget, requestOutput(8000, budget)) / 3),
-          ),
+          key: "index",
+          label: "更新本地检索索引",
+          input: {
+            chapterIds: p.chapters
+              .filter((chapter) => chapter.content)
+              .map((chapter) => chapter.id),
+          },
         },
+        () => services.retrieval.sync(p, { signal, progress }),
+        save,
+      );
+      state.retrievedContext = await traceOperation(
+        state,
+        {
+          key: "retrieval",
+          label: "本地混合检索",
+          input: {
+            chapterNumber: ch.number,
+            query: req.instruction + "\n" + ch.summary,
+          },
+        },
+        () =>
+          services.retrieval.search(
+            p,
+            ch.number,
+            req.instruction + "\n" + ch.summary,
+            {
+              signal,
+              profile: budget,
+              maxTokens: Math.min(
+                6000,
+                Math.floor(inputLimit(budget, requestOutput(8000, budget)) / 3),
+              ),
+            },
+          ),
+        save,
       );
       appendCreationEvent(state, {
         category: "memory",
@@ -428,11 +484,26 @@ export async function runChapterAgent(
       });
       await save();
     }
-    const { context, manifest } = contextFor(p, ch, req.instruction, entries, {
-      continuity,
-      profile: budget,
-      retrieved: state.retrievedContext,
-    });
+    const { context, manifest } = await traceOperation(
+      state,
+      {
+        key: "context",
+        label: `准备第 ${ch.number} 章记忆与上下文`,
+        input: {
+          chapterId: ch.id,
+          instruction: req.instruction,
+          memoryEntryIds: entries.map((entry) => entry.id),
+          retrieved: state.retrievedContext,
+        },
+      },
+      () =>
+        contextFor(p, ch, req.instruction, entries, {
+          continuity,
+          profile: budget,
+          retrieved: state.retrievedContext,
+        }),
+      save,
+    );
     const recentChapterId = p.chapters
       .filter((c) => c.number < ch.number)
       .sort((a, b) => a.number - b.number)
@@ -607,6 +678,8 @@ export async function runChapterAgent(
             6000,
             `调整第 ${ch.number} 章场景 ${i + 1} 的篇幅`,
             true,
+            false,
+            { traceOutputKey: key },
           );
           const rawKey = `raw-repair:${key}:${state.calls}`;
           state.fragments[rawKey] = fixed.text;
@@ -619,10 +692,15 @@ export async function runChapterAgent(
           await save();
           // 完整重写以供应商正常结束为准；标记只是辅助协议，漏写不能丢弃修订。
           // length 即便携带标记也不能当作完整输出。
-          if (fixed.finishReason !== "stop")
+          if (fixed.finishReason !== "stop") {
+            recordModelAcceptance(state, fixed.traceCallId, {
+              passed: false,
+              detail: "篇幅修订输出未完整结束",
+            });
             throw Error(
               "篇幅修订输出未完整结束，已保留原场景与修订尝试，可恢复重试。",
             );
+          }
           const candidate = fixed.text.replaceAll("〈场景完成〉", "").trim();
           const candidateWords = countWords(candidate);
           const improved =
@@ -637,6 +715,18 @@ export async function runChapterAgent(
             text = candidate;
             state.fragments[key] = text;
           }
+          recordModelAcceptance(
+            state,
+            fixed.traceCallId,
+            {
+              passed: improved,
+              detail: improved
+                ? "篇幅改善，接收修订稿"
+                : "篇幅未改善，保留已有草稿",
+            },
+            improved ? candidate : undefined,
+            `fragments.${key}`,
+          );
           appendCreationEvent(state, {
             category: "writing",
             status: improved ? "success" : "waiting",
@@ -710,6 +800,8 @@ export async function runChapterAgent(
           6000,
           `${round ? "修订" : "起草"}第 ${ch.number} 章 · 场景 ${i + 1}/${count}${text ? " · 续写" : ""}`,
           true,
+          false,
+          { traceOutputKey: key },
         );
         state.fragments[`raw-scene:${key}:${state.calls}`] = response.text;
         await save();
@@ -718,18 +810,40 @@ export async function runChapterAgent(
           response.finishReason === "stop" &&
           (response.text.includes("〈场景完成〉") ||
             countWords(text + next) >= lower);
-        if (!next && !(ended && text))
+        if (!next && !(ended && text)) {
+          recordModelAcceptance(state, response.traceCallId, {
+            passed: false,
+            detail: "没有新增正文",
+          });
           throw Error(
             response.finishReason === "length"
               ? "本次输出额度耗尽，尚未生成新增正文；已有草稿已保留，可恢复重试。"
               : "场景没有新增正文，已保存草稿。",
           );
-        if (next && text.endsWith(next))
+        }
+        if (next && text.endsWith(next)) {
+          recordModelAcceptance(state, response.traceCallId, {
+            passed: false,
+            detail: "续写重复已有结尾",
+          });
           throw Error("续写重复了已有结尾，已保留草稿，请检查后重试。");
+        }
         text +=
           (text && next && !state.values[`${key}:partial`] ? "\n\n" : "") +
           next;
         state.fragments[key] = text;
+        recordModelAcceptance(
+          state,
+          response.traceCallId,
+          {
+            passed: true,
+            detail: ended
+              ? "接收正文片段，场景已结束"
+              : "接收正文片段，继续续写",
+          },
+          next,
+          `fragments.${key}`,
+        );
         state.values[`${key}:partial`] = response.finishReason === "length";
         if (ended) state.values[`${key}:ended`] = true;
         await save();

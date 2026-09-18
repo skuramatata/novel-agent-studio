@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld("studio", {
   memory: (id) => ipcRenderer.invoke("studio:memory", id),
   task: (id) => ipcRenderer.invoke("studio:task", id),
   logs: (id, options) => ipcRenderer.invoke("studio:logs", id, options),
+  logNode: (id, taskId, nodeId) =>
+    ipcRenderer.invoke("studio:log-node", id, taskId, nodeId),
   list: () => ipcRenderer.invoke("studio:list"),
   select: (id) => ipcRenderer.invoke("studio:select", id),
   create: (title) => ipcRenderer.invoke("studio:create", title),

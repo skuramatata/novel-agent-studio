@@ -1,4 +1,7 @@
 import { ScrollText, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { ExecutionFlow } from "./ExecutionFlow";
+import { ExecutionTimeline } from "./ExecutionTimeline";
 import { useCreationLogs } from "./useCreationLogs";
 import type { CreationLogEvent } from "../lib/types";
 const categories: Record<string, string> = {
@@ -56,6 +59,7 @@ function LogEntry({ event }: { event: CreationLogEvent }) {
   );
 }
 export function CreationLogs() {
+  const [view, setView] = useState<"timeline" | "flow" | "events">("timeline");
   const { data, options, change, error, loading, refresh } = useCreationLogs();
   const tasks = data?.tasks || [];
   const selected = data?.selected;
@@ -72,7 +76,7 @@ export function CreationLogs() {
             <ScrollText size={26} /> 从想法到成稿的每一步
           </h1>
           <p>
-            按任务查看规划、生成、审稿、作者取舍和采纳记录。生成期间自动更新。
+            沿时间线查看每一步，点击展开输入、模型请求、原始输出及接收结果。生成期间自动更新。
           </p>
         </div>
         <button className="secondary" onClick={refresh} disabled={loading}>
@@ -175,6 +179,23 @@ export function CreationLogs() {
           仅异常与等待
         </label>
       </div>
+      <div className="log-view-switch" aria-label="日志视图">
+        <button
+          aria-pressed={view === "timeline"}
+          onClick={() => setView("timeline")}
+        >
+          执行时间线
+        </button>
+        <button aria-pressed={view === "flow"} onClick={() => setView("flow")}>
+          节点流程
+        </button>
+        <button
+          aria-pressed={view === "events"}
+          onClick={() => setView("events")}
+        >
+          事件记录
+        </button>
+      </div>
       {loading && !data ? (
         <p role="status">正在读取创作日志…</p>
       ) : !selected ? (
@@ -183,6 +204,10 @@ export function CreationLogs() {
           <h3>还没有创作任务</h3>
           <p>开始规划或生成章节后，过程会自动记录在这里。</p>
         </div>
+      ) : view === "timeline" && data ? (
+        <ExecutionTimeline key={selected.id} data={data} />
+      ) : view === "flow" && data ? (
+        <ExecutionFlow key={selected.id} data={data} />
       ) : (
         <>
           <p className="small muted">

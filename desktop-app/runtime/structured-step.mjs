@@ -11,6 +11,7 @@ import {
 import { digest } from "./memory.mjs";
 import { requestOutput } from "./model-capabilities.mjs";
 import { stageCategory, appendCreationEvent } from "./creation-log.mjs";
+import { recordModelAcceptance } from "./execution-log.mjs";
 import { fitWritingContext } from "./context-budget.mjs";
 import {
   parseStructured,
@@ -176,8 +177,18 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         (reusableAcrossRounds &&
           previousStep?.status === "succeeded" &&
           digest(previousStep.input) === digest(baseMessages)))
-    )
-      return validate(structuredClone(state.values[key]));
+    ) {
+      const value = validate(structuredClone(state.values[key]));
+      if (previousStep) {
+        (previousStep.reuses ??= []).push({
+          at: new Date().toISOString(),
+          resultKey: key,
+          sourceStepId: previousStep.id,
+        });
+        await save();
+      }
+      return value;
+    }
     state.structuredSteps ??= {};
     const step = (state.structuredSteps[id] ??= {
       id,
@@ -314,6 +325,8 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         // 网络中断保留本次纠错输入；不刷新格式纠错预算。
         const response = await call(messages, tokens, label, true, {
           reasoningEffort: options.reasoningEffort,
+          traceStepId: id,
+          traceOutputKey: key,
         });
         observeReasoning(budget, outputScope, response.usage);
         step.calls++;
@@ -329,7 +342,12 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
             options.reasoningEffort ||
             (budget.highReasoning ? "high" : undefined),
           stepId: id,
+          traceCallId: response.traceCallId,
         };
+        const recordedCall = state.modelCalls?.find(
+          (record) => record.id === response.traceCallId,
+        );
+        if (recordedCall) recordedCall.rawKey = rawKey;
         step.rawKey = step.pendingRaw = rawKey;
         step.status = "received";
         // 结果已落盘而校验尚未完成时，重启直接校验此响应，不再调用模型。
@@ -353,6 +371,13 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
           reasoningExhausted:
             budget.highReasoning && reasoningExhausted(response),
         };
+        const validation = {
+          passed: false,
+          stage: "output_limit",
+          detail: step.lastFailure.detail,
+        };
+        (step.validations ??= {})[rawKey] = validation;
+        recordModelAcceptance(state, response.traceCallId, validation);
         if (step.lastFailure.reasoningExhausted) {
           // 高强度只允许一次轻量恢复；低强度仍耗尽交给阶段拆分，不能原样扩容。
           if (
@@ -393,9 +418,14 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         await save();
         continue;
       }
-      let value;
+      let value, parsed;
       try {
-        value = validateResponse(parseStructured(response.text));
+        parsed = parseStructured(response.text);
+        const recordedCall = state.modelCalls?.find(
+          (record) => record.id === response.traceCallId,
+        );
+        if (recordedCall) recordedCall.parsedOutput = structuredClone(parsed);
+        value = validateResponse(parsed);
       } catch (error) {
         const detail = authorProtocol.diagnostic(validationReason(error));
         step.lastFailure = {
@@ -406,6 +436,13 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
           ...(error.targets ? { targets: error.targets } : {}),
         };
         step.status = "correcting";
+        const validation = {
+          passed: false,
+          stage: step.lastFailure.kind,
+          detail,
+        };
+        (step.validations ??= {})[rawKey] = validation;
+        recordModelAcceptance(state, response.traceCallId, validation);
         appendCreationEvent(state, {
           category: stageCategory(label),
           status: "failed",
@@ -426,6 +463,19 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
       (state.structuredResults ??= {})[key] = id;
       step.resultKey = key;
       step.status = "succeeded";
+      const validation = {
+        passed: true,
+        stage: "validation",
+        detail: "通过解析、节点契约与业务校验",
+      };
+      (step.validations ??= {})[rawKey] = validation;
+      recordModelAcceptance(
+        state,
+        response.traceCallId,
+        validation,
+        value,
+        key,
+      );
       delete step.lastFailure;
       delete step.correction;
       if (state.structuredFailure?.stepId === id)

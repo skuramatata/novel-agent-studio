@@ -1,0 +1,200 @@
+.log-view-switch {
+  display: flex;
+  gap: 8px;
+  margin: 18px 0;
+}
+.log-view-switch button,
+.trace-tabs button {
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 6px;
+}
+.log-view-switch button[aria-pressed="true"],
+.trace-tabs button[aria-selected="true"] {
+  border-color: var(--accent);
+  box-shadow: inset 0 -2px var(--accent);
+  font-weight: 700;
+}
+.trace-flow-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 20px;
+  margin: 16px 0;
+}
+.trace-flow-toolbar label {
+  flex: 1;
+  min-width: 0;
+}
+.trace-flow-toolbar p {
+  margin: 0;
+}
+.execution-flow-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(360px, 1fr);
+  min-height: 590px;
+  height: min(760px, 78vh);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.execution-flow-canvas {
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+.trace-node {
+  width: 250px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 3px 10px var(--shadow-color);
+}
+.trace-node.selected {
+  border: 2px solid var(--accent);
+  padding: 11px 13px;
+}
+.trace-node.failed {
+  border-style: double;
+  border-width: 3px;
+  padding: 10px 12px;
+}
+.trace-node strong {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 7px 0;
+  line-height: 1.5;
+}
+.trace-node-kind,
+.trace-node-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.trace-node-kind,
+.trace-node small {
+  color: var(--muted);
+}
+.trace-node-status span {
+  margin-left: auto;
+}
+.trace-node .react-flow__handle {
+  background: var(--muted);
+}
+.trace-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  padding: 20px;
+}
+.trace-detail-heading h2 {
+  margin: 7px 0;
+  font-size: 19px;
+  overflow-wrap: anywhere;
+}
+.trace-detail-heading p {
+  margin: 5px 0;
+}
+.trace-attempt-picker {
+  margin: 18px 0 8px;
+}
+.trace-attempt-meta {
+  display: flex;
+  gap: 6px 12px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+.trace-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 18px;
+}
+.trace-tabs button {
+  font-size: 12px;
+  padding: 6px 9px;
+}
+.trace-tab-panel {
+  min-width: 0;
+}
+.trace-content {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.trace-content-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+.trace-content-toolbar button {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.trace-content pre {
+  margin: 0;
+  padding: 14px;
+  font:
+    12px/1.8 ui-monospace,
+    SFMono-Regular,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 480px;
+  overflow-y: auto;
+  tab-size: 2;
+}
+.trace-missing {
+  padding: 24px 16px;
+  background: var(--bg);
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+}
+.trace-reuses {
+  margin: 12px 0;
+}
+.execution-flow-canvas .react-flow__controls button {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--line);
+}
+.execution-flow-canvas .react-flow__controls button svg {
+  fill: currentColor;
+}
+@media (max-width: 1100px) {
+  .execution-flow-layout {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .execution-flow-canvas {
+    height: 400px;
+  }
+  .trace-detail {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    max-height: 650px;
+  }
+  .trace-flow-toolbar {
+    flex-wrap: wrap;
+  }
+  .trace-flow-toolbar label {
+    flex-basis: 100%;
+  }
+}

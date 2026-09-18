@@ -271,6 +271,11 @@ export interface Bridge {
     revision: number,
   ) => Promise<Project>;
   logs: (id: string, options?: CreationLogOptions) => Promise<CreationLogView>;
+  logNode: (
+    id: string,
+    taskId: string,
+    nodeId: string,
+  ) => Promise<ExecutionNodeDetail>;
   memory: (id: string) => Promise<MemoryView>;
   task: (id: string) => Promise<ChapterTask | null>;
   load: (id?: string) => Promise<Project>;
@@ -338,6 +343,16 @@ export interface CreationLogEvent {
   details: Record<string, string | number>;
 }
 export interface CreationLogView {
+  flow: {
+    nodes: ExecutionNodeSummary[];
+    edges: {
+      id: string;
+      source: string;
+      target: string;
+      kind: "dependency" | "sequence";
+    }[];
+    total: number;
+  };
   tasks: CreationLogTask[];
   selected: CreationLogTask | null;
   events: CreationLogEvent[];
@@ -347,6 +362,48 @@ export interface CreationLogView {
   offset: number;
   hasOlderTasks: boolean;
   warnings: string[];
+}
+export interface ExecutionNodeSummary {
+  id: string;
+  label: string;
+  kind: string;
+  category: string;
+  status: string;
+  source: string;
+  startedAt: string | null;
+  attemptCount: number;
+  hasProblems: boolean;
+}
+export interface ExecutionAttempt {
+  id: string;
+  status: string;
+  startedAt?: string;
+  endedAt?: string;
+  input?: unknown;
+  request?: unknown;
+  requestNote: string;
+  rawOutput?: string;
+  rawNote: string;
+  parsedOutput?: unknown;
+  acceptedOutput?: unknown;
+  responseMeta?: { model?: string; finishReason?: string; usage?: unknown };
+  validation?: { passed: boolean; stage?: string; detail: string };
+  error?: string;
+  partial?: boolean;
+  resultKey?: string;
+}
+export interface ExecutionNodeDetail extends ExecutionNodeSummary {
+  input?: unknown;
+  inputNote?: string;
+  acceptedOutput?: unknown;
+  outputKey?: string;
+  error?: string;
+  contract?: string;
+  details?: Record<string, string | number>;
+  redacted?: boolean;
+  attempts: ExecutionAttempt[];
+  reuses?: unknown[];
+  dependencies?: string[];
 }
 declare global {
   interface Window {

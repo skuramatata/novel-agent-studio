@@ -27,17 +27,26 @@ export async function runDag(nodes, { state, save, signal, key }) {
     const record = graph.nodes[node.id];
     if (record?.status === "completed") {
       outputs[node.id] = node.validate(structuredClone(record.output));
+      (record.reuses ??= []).push({
+        at: new Date().toISOString(),
+        sourceNodeId: node.id,
+      });
+      await save();
       continue;
     }
     graph.nodes[node.id] = {
       status: "running",
       startedAt: new Date().toISOString(),
+      input: structuredClone(
+        Object.fromEntries(node.deps.map((id) => [id, outputs[id]])),
+      ),
     };
     await save();
     try {
       const output = node.validate(await node.run(outputs));
       signal.throwIfAborted();
       graph.nodes[node.id] = {
+        ...graph.nodes[node.id],
         status: "completed",
         output,
         completedAt: new Date().toISOString(),
@@ -46,6 +55,7 @@ export async function runDag(nodes, { state, save, signal, key }) {
       outputs[node.id] = output;
     } catch (e) {
       graph.nodes[node.id] = {
+        ...graph.nodes[node.id],
         status: signal.aborted ? "interrupted" : "failed",
         error: e.message,
       };

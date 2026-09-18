@@ -37,6 +37,7 @@ import { draftScenes } from "../runtime/revision-session.mjs";
 import { isReviewDecisionReplay } from "../runtime/review-resolution.mjs";
 import {
   readCreationLogs,
+  readCreationLogNode,
   appendCreationEvent,
 } from "../runtime/creation-log.mjs";
 import {
@@ -188,6 +189,17 @@ handle("logs", (id, options) =>
       await store.runtimeDirectoryFor(id),
       await store.load(id),
       options,
+      !!active,
+    ),
+  ),
+);
+handle("log-node", (id, taskId, nodeId) =>
+  serial(async () =>
+    readCreationLogNode(
+      await store.runtimeDirectoryFor(id),
+      await store.load(id),
+      taskId,
+      nodeId,
       !!active,
     ),
   ),
@@ -526,6 +538,17 @@ async function executeGenerate(req, controller) {
           fetch,
           {
             resolvedTask: generated.task,
+            onTrace: async (record) => {
+              const id = `call-${legacyBaseCalls + record.sequence}`;
+              const records = (checkpointState.modelCalls ??= []);
+              const index = records.findIndex((item) => item.id === id);
+              const value = { ...record, id };
+              if (index < 0) records.push(value);
+              else records[index] = value;
+              checkpointState.calls = legacyBaseCalls + record.sequence;
+              checkpointState.updatedAt = new Date().toISOString();
+              await checkpoint.write(checkpointState);
+            },
             onLog: async (event) => {
               checkpointState.stage = event.title;
               if (typeof event.details?.调用次数 === "number")

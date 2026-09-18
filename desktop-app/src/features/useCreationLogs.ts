@@ -1,10 +1,19 @@
 import { useEffect, useState } from "react";
 import { useStudio } from "../state/StudioContext";
 import { bridge } from "../lib/bridge";
-import type { CreationLogOptions, CreationLogView } from "../lib/types";
+import type {
+  CreationLogOptions,
+  CreationLogView,
+  ExecutionNodeDetail,
+} from "../lib/types";
 export function useCreationLogs() {
   const { project, busy } = useStudio();
-  const [options, setOptions] = useState<CreationLogOptions>({});
+  const [selection, setSelection] = useState<{
+    projectId?: string;
+    options: CreationLogOptions;
+  }>({ options: {} });
+  const options =
+    selection.projectId === project?.projectId ? selection.options : {};
   const [refreshKey, setRefreshKey] = useState(0);
   const [snapshot, setSnapshot] = useState<{
     projectId: string;
@@ -35,6 +44,7 @@ export function useCreationLogs() {
       }
     };
     setLoading(true);
+    setError("");
     timer = setTimeout(refresh, 150);
     return () => {
       alive = false;
@@ -51,6 +61,43 @@ export function useCreationLogs() {
     loading,
     refresh: () => setRefreshKey((n) => n + 1),
     change: (next: CreationLogOptions) =>
-      setOptions((old) => ({ ...old, limit: 200, ...next })),
+      setSelection((old) => ({
+        projectId: project?.projectId,
+        options: {
+          ...(old.projectId === project?.projectId ? old.options : {}),
+          limit: 200,
+          ...next,
+        },
+      })),
   };
+}
+
+export function useCreationLogNode(
+  taskId: string,
+  nodeId: string,
+  updatedAt: string | null,
+) {
+  const { project } = useStudio();
+  const key = JSON.stringify([project?.projectId, taskId, nodeId]);
+  const [snapshot, setSnapshot] = useState<{
+    key: string;
+    data?: ExecutionNodeDetail;
+    error?: string;
+  } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (!project || !nodeId) return;
+    void bridge.logNode(project.projectId, taskId, nodeId).then(
+      (data) => {
+        if (alive) setSnapshot({ key, data });
+      },
+      (error) => {
+        if (alive) setSnapshot({ key, error: error.message });
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [key, updatedAt]);
+  return snapshot?.key === key ? snapshot : null;
 }

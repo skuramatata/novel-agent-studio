@@ -1,0 +1,37 @@
+.log-json {
+  padding: 14px;
+  max-height: 480px;
+  overflow: auto;
+  font:
+    12px/1.8 ui-monospace,
+    SFMono-Regular,
+    monospace;
+  overflow-wrap: anywhere;
+}
+.log-json-branch > summary {
+  cursor: pointer;
+  padding: 2px 0;
+}
+.log-json-children {
+  margin-left: 8px;
+  padding-left: 16px;
+  border-left: 1px solid var(--line);
+}
+.log-json-entry {
+  white-space: pre-wrap;
+}
+.log-json-key {
+  color: var(--accent);
+}
+.log-json-string {
+  color: var(--text);
+}
+.log-json-number,
+.log-json-boolean {
+  color: var(--accent);
+  font-weight: 600;
+}
+.log-json-null,
+.log-json-count {
+  color: var(--muted);
+}

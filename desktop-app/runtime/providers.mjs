@@ -106,6 +106,39 @@ async function requestCompletion(
   validateProvider(config);
   signal?.throwIfAborted();
   if (!config.apiKey) throw new Error("尚未配置此供应商的 API Key。");
+  const payload = {
+    model: config.model,
+    messages,
+    stream: true,
+    [modelCapabilities(config).outputParameter]: Math.min(
+      maxTokens,
+      modelCapabilities(config).maxOutputTokens,
+    ),
+    ...(config.provider === "minimax"
+      ? {
+          reasoning_split: true,
+          ...(/^MiniMax-M3/i.test(config.model)
+            ? {
+                thinking: {
+                  type: "adaptive",
+                },
+              }
+            : {}),
+        }
+      : /^glm-5\.3$/i.test(config.model)
+        ? {
+            thinking: { type: "enabled" },
+            reasoning_effort:
+              options.reasoningEffort === "low" ? "low" : "high",
+          }
+        : {
+            thinking: { type: options.reasoning ? "enabled" : "disabled" },
+            ...(options.reasoning && /^glm-5\.2/i.test(config.model)
+              ? { reasoning_effort: "high" }
+              : {}),
+          }),
+  };
+  await options.onRequest?.(structuredClone(payload));
   const response = await fetcher(
     config.baseUrl.replace(/\/$/, "") + "/chat/completions",
     {
@@ -116,38 +149,7 @@ async function requestCompletion(
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({
-        model: config.model,
-        messages,
-        stream: true,
-        [modelCapabilities(config).outputParameter]: Math.min(
-          maxTokens,
-          modelCapabilities(config).maxOutputTokens,
-        ),
-        ...(config.provider === "minimax"
-          ? {
-              reasoning_split: true,
-              ...(/^MiniMax-M3/i.test(config.model)
-                ? {
-                    thinking: {
-                      type: "adaptive",
-                    },
-                  }
-                : {}),
-            }
-          : /^glm-5\.3$/i.test(config.model)
-            ? {
-                thinking: { type: "enabled" },
-                reasoning_effort:
-                  options.reasoningEffort === "low" ? "low" : "high",
-              }
-            : {
-                thinking: { type: options.reasoning ? "enabled" : "disabled" },
-                ...(options.reasoning && /^glm-5\.2/i.test(config.model)
-                  ? { reasoning_effort: "high" }
-                  : {}),
-              }),
-      }),
+      body: JSON.stringify(payload),
     },
   );
   if (!response.ok) {
@@ -171,13 +173,25 @@ async function requestCompletion(
       `模型接口返回 HTTP ${response.status}。请检查套餐密钥、模型权限或额度；未切换其他计费入口。`,
     );
   }
-  const data = response.headers
-    ?.get("content-type")
-    ?.includes("text/event-stream")
-    ? await readCompletionStream(response, signal, (delta) =>
-        progress.update(delta),
-      )
-    : await response.json();
+  let data;
+  try {
+    data = response.headers?.get("content-type")?.includes("text/event-stream")
+      ? await readCompletionStream(response, signal, (delta) =>
+          progress.update(delta),
+        )
+      : await response.json();
+  } catch (error) {
+    if (error.partialResponse)
+      await options.onResponse?.({
+        ...error.partialResponse,
+        text: error.partialResponse.text.replace(
+          /<think>[\s\S]*?(?:<\/think>|$)/gi,
+          "",
+        ),
+        partial: true,
+      });
+    throw error;
+  }
   signal?.throwIfAborted();
   if (data.base_resp && data.base_resp.status_code !== 0)
     throw new Error(
@@ -187,15 +201,17 @@ async function requestCompletion(
     throw new Error("模型接口返回业务错误，请检查模型与套餐权限。");
   const choice = data.choices?.[0];
   const content = choice?.message?.content;
+  const visibleText =
+    typeof content === "string"
+      ? content.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
+      : "";
   const result = {
-    text:
-      typeof content === "string"
-        ? content.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
-        : "",
+    text: visibleText.trim(),
     usage: data.usage ?? null,
     model: data.model || config.model,
     finishReason: choice?.finish_reason || "unknown",
   };
+  await options.onResponse?.({ ...result, text: visibleText });
   // length 可能只消耗了思考额度，正文为空；仍保留结束原因与实际用量。
   if (result.finishReason === "length") {
     if (options.allowPartial) return result;

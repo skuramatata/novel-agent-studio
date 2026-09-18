@@ -4,6 +4,8 @@ import { workflowContract, workflowMessages } from "./workflow-skill.mjs";
 import { projectWordTolerance, wordToleranceLabel } from "./word-range.mjs";
 import { complete } from "./providers.mjs";
 import { parseStructured, structuredRetryMessages } from "./structured.mjs";
+import { digest } from "./memory.mjs";
+import { stageCategory } from "./creation-log.mjs";
 import {
   createBudgetProfile,
   ensureBudget,
@@ -67,6 +69,67 @@ export function parseProposal(text) {
   if (value.memory) throw Error("记忆由独立正文抽取流程生成。");
   return proposalContract.parse(value);
 }
+
+async function legacyCompletion(
+  config,
+  messages,
+  signal,
+  fetcher,
+  output,
+  providerOptions,
+  trace,
+  onTrace,
+) {
+  if (!onTrace)
+    return complete(config, messages, signal, fetcher, output, providerOptions);
+  const record = {
+    ...trace,
+    input: structuredClone(messages),
+    category: stageCategory(trace.label),
+    startedAt: new Date().toISOString(),
+    status: "running",
+  };
+  const emit = () => onTrace(structuredClone(record));
+  await emit();
+  try {
+    const result = await complete(config, messages, signal, fetcher, output, {
+      ...providerOptions,
+      onRequest: async (request) => {
+        record.request = request;
+        await emit();
+      },
+      onResponse: async ({ text, partial, ...meta }) => {
+        record.rawOutput = text;
+        record.responseMeta = meta;
+        record.partial = !!partial;
+        record.status = "received";
+        record.endedAt = new Date().toISOString();
+        await emit();
+      },
+    });
+    return { ...result, trace: record };
+  } catch (error) {
+    record.status = signal.aborted ? "interrupted" : "failed";
+    record.error = error.message;
+    record.endedAt = new Date().toISOString();
+    await emit();
+    throw error;
+  }
+}
+async function finishLegacyTrace(
+  options,
+  response,
+  validation,
+  acceptedOutput,
+) {
+  if (!response.trace) return;
+  await options.onTrace({
+    ...response.trace,
+    validation,
+    acceptedOutput,
+    status: validation.passed ? "success" : "failed",
+  });
+}
 export async function runAgent(
   project,
   instruction,
@@ -97,6 +160,7 @@ export async function runAgent(
       options,
     );
   let messages = buildMessages(project, instruction);
+  const nodeId = `legacy:${digest(messages)}`;
   const budget = createBudgetProfile(config);
   let calls = 0;
   const usages = [];
@@ -119,12 +183,21 @@ export async function runAgent(
     calls++;
     let result;
     try {
-      result = await complete(config, messages, signal, fetcher, output, {
-        onProgress: (detail) =>
-          progress(
-            `${attempt ? "修复候选结构与约束" : "规划与讨论"} · ${detail}`,
-          ),
-      });
+      result = await legacyCompletion(
+        config,
+        messages,
+        signal,
+        fetcher,
+        output,
+        {
+          onProgress: (detail) =>
+            progress(
+              `${attempt ? "修复候选结构与约束" : "规划与讨论"} · ${detail}`,
+            ),
+        },
+        { sequence: calls, nodeId, label: "规划与讨论" },
+        options.onTrace,
+      );
     } catch (error) {
       error.details = { calls, usages, stage: "provider" };
       throw error;
@@ -143,19 +216,16 @@ export async function runAgent(
       },
     });
     signal?.throwIfAborted();
+    let proposal;
     try {
-      const proposal = parseProposal(result.text);
+      if (result.trace)
+        result.trace.parsedOutput = parseStructured(result.text);
+      proposal = parseProposal(result.text);
       if (proposal.revisionScope) throw Error("规划任务不能授权正文修改。");
       applyProposal(project, proposal, project.revision);
-      return {
-        proposal,
-        model: result.model,
-        usages,
-        calls,
-        promptVersion: PROMPT_VERSION,
-      };
     } catch (error) {
       last = error.message;
+      await finishLegacyTrace(options, result, { passed: false, detail: last });
       messages = structuredRetryMessages(
         messages,
         result.text,
@@ -163,7 +233,21 @@ export async function runAgent(
         8000,
         budget,
       );
+      continue;
     }
+    await finishLegacyTrace(
+      options,
+      result,
+      { passed: true, detail: "候选结构、故事约束与应用校验通过" },
+      proposal,
+    );
+    return {
+      proposal,
+      model: result.model,
+      usages,
+      calls,
+      promptVersion: PROMPT_VERSION,
+    };
   }
   const error = new Error(
     "两次生成均未通过结构或故事约束检查，未改动作品。请缩小请求范围。",
@@ -214,6 +298,7 @@ async function runWritingTask(
     // 讨论入口已经附带同一技能，其他阶段在这里统一加载。
     if (schema !== proposalSchema)
       messages = workflowMessages(messages, contract);
+    const nodeId = `legacy:${digest([name, messages])}`;
     stage = name;
     progress(name);
     await options.onLog?.({
@@ -232,13 +317,15 @@ async function runWritingTask(
       );
       ensureBudget(messages, output, budget);
       calls++;
-      const response = await complete(
+      const response = await legacyCompletion(
         config,
         messages,
         signal,
         fetcher,
         output,
         { reasoning, onProgress: (detail) => progress(`${name} · ${detail}`) },
+        { sequence: calls, nodeId, label: name },
+        options.onTrace,
       );
       observeReasoning(budget, "general", response.usage);
       usages.push(response.usage);
@@ -252,9 +339,16 @@ async function runWritingTask(
       });
       let value;
       try {
-        value = validate(contract.parse(parseStructured(response.text)));
+        const parsed = parseStructured(response.text);
+        if (response.trace)
+          response.trace.parsedOutput = structuredClone(parsed);
+        value = validate(contract.parse(parsed));
       } catch (e) {
         last = e.message;
+        await finishLegacyTrace(options, response, {
+          passed: false,
+          detail: last,
+        });
         messages = structuredRetryMessages(
           messages,
           response.text,
@@ -264,6 +358,12 @@ async function runWritingTask(
         );
         continue;
       }
+      await finishLegacyTrace(
+        options,
+        response,
+        { passed: true, detail: "节点契约与业务校验通过" },
+        value,
+      );
       await emit(name, value);
       signal.throwIfAborted();
       return value;

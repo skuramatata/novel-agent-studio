@@ -1772,7 +1772,7 @@ nav button:hover {
 .creation-logs {
   height: 100%;
   overflow-y: auto;
-  max-width: 1150px;
+  max-width: none;
   margin: 0 auto;
   padding: 32px;
 }

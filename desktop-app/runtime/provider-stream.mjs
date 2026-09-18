@@ -80,6 +80,14 @@ export async function readCompletionStream(response, signal, onDelta) {
       usage,
       model,
     };
+  } catch (error) {
+    error.partialResponse = {
+      text,
+      usage,
+      model,
+      finishReason: finishReason || "interrupted",
+    };
+    throw error;
   } finally {
     signal?.removeEventListener("abort", abort);
     await reader.cancel().catch(() => {});

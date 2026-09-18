@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { digest } from "./memory.mjs";
 import { countWords } from "./writing.mjs";
+import { executionNodes, executionGraph } from "./execution-log.mjs";
 
 export const logCategories = {
   task: "任务",
@@ -426,7 +427,11 @@ export async function readCreationLogs(
           .toLocaleLowerCase()
           .includes(query.toLocaleLowerCase())),
   );
+  const nodes = selected
+    ? executionNodes(selected, all, isRunning && selected.id === current?.id)
+    : [];
   return {
+    flow: executionGraph(nodes, options),
     tasks: states.map((s) =>
       summary(s, project, isRunning && s.id === current?.id),
     ),
@@ -441,4 +446,34 @@ export async function readCreationLogs(
     hasOlderTasks: offset + 30 < dated.length,
     warnings,
   };
+}
+
+export async function readCreationLogNode(
+  directory,
+  project,
+  taskId,
+  nodeId,
+  isRunning = false,
+) {
+  if (typeof taskId !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(taskId))
+    throw Error("无效任务编号");
+  if (typeof nodeId !== "string" || nodeId.length > 1000)
+    throw Error("无效节点编号");
+  let state;
+  try {
+    state = await readJson(join(directory, "chapter-task.json"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const current = state?.id === taskId;
+  if (!current)
+    state = await readJson(join(directory, "task-history", `${taskId}.json`));
+  if (state.id !== taskId) throw Error("任务编号不一致");
+  const node = executionNodes(
+    state,
+    taskEvents(state, project),
+    isRunning && current,
+  ).find((item) => item.id === nodeId);
+  if (!node) throw Error("所选节点不存在");
+  return node;
 }
