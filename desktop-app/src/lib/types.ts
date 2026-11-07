@@ -48,6 +48,8 @@ export interface Chapter {
 export interface Proposal {
   summary: string;
   memory?: StoryMemory;
+  // 候选事件链：增量补丁（草稿形态）或已合并的完整图。
+  storyEvents?: StoryEvents | StoryEventsPatch;
   revisionScope?: string[];
   author?: Author;
   premise?: Premise;
@@ -258,7 +260,256 @@ export interface ProjectSummary {
   revision: number;
   archived: boolean;
 }
+export type StoryEventKind =
+  | "action"
+  | "decision"
+  | "discovery"
+  | "handover"
+  | "state-change"
+  | "recall"
+  | "other";
+export type StoryEventStatus =
+  | "confirmed"
+  | "candidate"
+  | "provisional"
+  | "conflict";
+export type StoryEventBasis =
+  | "narration"
+  | "testimony"
+  | "document"
+  | "belief"
+  | "rumor"
+  | "author";
+export type StoryEdgeType =
+  | "causal"
+  | "knowledge"
+  | "state-transfer"
+  | "recall"
+  | "foreshadow"
+  | "payoff"
+  | "support"
+  | "contradict"
+  | "related";
+export type StoryEdgeBasis =
+  | "explicit"
+  | "inferred"
+  | "author-confirmed"
+  | "unverified";
+export type StoryCoverageStatus = "extracted" | "partial" | "failed" | "pending";
+export type StoryIssueKind =
+  | "missing-source"
+  | "state-break"
+  | "unsourced-knowledge"
+  | "conflict"
+  | "stale-evidence";
+export type StoryIssueDisposition =
+  | "open"
+  | "kept"
+  | "dismissed"
+  | "author-decided";
+export type StoryReviewState =
+  | "unreviewed"
+  | "checked"
+  | "flagged"
+  | "author-confirmed";
+export interface StoryEvidence {
+  chapterId: string;
+  sourceHash: string;
+  start: number;
+  end: number;
+  quote: string;
+}
+export interface StoryReview {
+  state: StoryReviewState;
+  note: string;
+  at: string | null;
+}
+export interface StoryStale {
+  at: string;
+  reason: "source-changed" | "quote-missing" | "chapter-missing";
+  expectedHash: string;
+}
+export interface StoryEventNode {
+  id: string;
+  chapterId: string;
+  chapterNumber: number;
+  chapterTitle: string;
+  storyTime: string;
+  narrativeOffset: number;
+  title: string;
+  summary: string;
+  kind: StoryEventKind;
+  actors: string[];
+  objects: string[];
+  status: StoryEventStatus;
+  basis: StoryEventBasis;
+  evidence: StoryEvidence;
+  review: StoryReview;
+  stale: StoryStale | null;
+}
+export interface StoryEventEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: StoryEdgeType;
+  basis: StoryEdgeBasis;
+  explanation: string;
+  evidence: StoryEvidence[];
+  review: StoryReview;
+  stale: StoryStale | null;
+}
+export interface StoryCoverage {
+  chapterId: string;
+  status: StoryCoverageStatus;
+  parts: number[];
+  extractedAt: string | null;
+  model: string;
+  failure: string | null;
+}
+export interface StoryIssue {
+  id: string;
+  kind: StoryIssueKind;
+  nodeIds: string[];
+  edgeIds: string[];
+  explanation: string;
+  suggestion: string;
+  disposition: StoryIssueDisposition;
+}
+export interface StoryEventPatchNode {
+  chapterId: string;
+  title: string;
+  summary?: string;
+  kind?: StoryEventKind;
+  actors?: string[];
+  objects?: string[];
+  status?: StoryEventStatus;
+  basis?: StoryEventBasis;
+  storyTime?: string;
+  evidence: { start: number; end: number; quote: string };
+}
+export interface StoryEventsPatch {
+  nodes: StoryEventPatchNode[];
+  edges?: unknown[];
+  coverage?: StoryCoverage[];
+}
+export interface StoryEvents {
+  version: 1;
+  nodes: StoryEventNode[];
+  edges: StoryEventEdge[];
+  coverage: StoryCoverage[];
+  issues: StoryIssue[];
+}
+export type StoryDirection = "up" | "down" | "both";
+export interface StoryEventQuery {
+  focusEventId?: string;
+  chapterId?: string;
+  direction?: StoryDirection;
+  depth?: number;
+}
+export interface StoryEventChapter {
+  id: string;
+  number: number;
+  title: string;
+  hasContent: boolean;
+  coverage: StoryCoverageStatus | null;
+}
+export interface CandidateOrigin {
+  messageId: string;
+  model?: string;
+}
+export type StoryEventCandidateNode = StoryEventNode & {
+  origin: CandidateOrigin;
+};
+export type StoryEventCandidateEdge = StoryEventEdge & {
+  origin: CandidateOrigin;
+};
+// R8 界面侧：候选自带的问题与正式图 issues 分开，不混为一谈。
+export interface StoryCandidateIssue extends StoryIssue {
+  origin: CandidateOrigin;
+  // 候选问题附带的原文证据，由主进程按候选正文视图回填。
+  evidence: StoryEvidence[];
+}
+export interface StoryEventView {
+  graph: StoryEvents;
+  view: { nodes: StoryEventNode[]; edges: StoryEventEdge[]; seeds: string[] };
+  candidates: {
+    nodes: StoryEventCandidateNode[];
+    edges: StoryEventCandidateEdge[];
+    issues: StoryCandidateIssue[];
+  };
+  chapters: StoryEventChapter[];
+  focus: { eventId: string | null; direction: StoryDirection; depth: number };
+  counts: {
+    nodes: number;
+    edges: number;
+    staleNodes: number;
+    staleEdges: number;
+    candidates: number;
+    issues: number;
+  };
+  warnings: string[];
+}
+// R7：历史建图的进度视图。字段对应主进程返回，未提供能力时 enabled=false。
+export type StoryBuildChapterStatus = StoryCoverageStatus;
+export interface StoryBuildChapter {
+  chapterId: string;
+  chapterNumber: number;
+  chapterTitle: string;
+  status: StoryBuildChapterStatus;
+  // 已完成的正文分片序号；空数组表示尚未开始。
+  parts: number[];
+  eventCount: number;
+  failure: string | null;
+}
+export interface StoryBuildProgress {
+  enabled: boolean;
+  // idle=可开始；running=进行中；partial=有章失败或未建完；complete=全部已抽取。
+  state: "idle" | "running" | "partial" | "complete" | "unsupported";
+  mode: "build" | "complete";
+  hasContent: boolean;
+  chapters: StoryBuildChapter[];
+  counts: {
+    total: number;
+    extracted: number;
+    partial: number;
+    failed: number;
+    pending: number;
+  };
+  failure: string | null;
+  // 只更新派生事件数据、不改正文，界面必须原样转述这句。
+  touchesManuscript: false;
+}
+// R9：作者对单个问题的处理决定。沿用 runtime 既有 disposition 枚举，不另造。
+export type StoryIssueDecision = Exclude<StoryIssueDisposition, "open">;
+export interface StoryIssueDecisionRequest {
+  projectId: string;
+  issueId: string;
+  decision: StoryIssueDecision;
+  note?: string;
+}
+// R9：显式修订请求。只生成请求体交给既有草稿修订流程，不新建正文写入口。
+export interface StoryRevisionRequest {
+  issueId: string;
+  chapterId: string;
+  chapterNumber: number;
+  chapterTitle: string;
+  explanation: string;
+  suggestion: string;
+  evidence: StoryEvidence[];
+  instruction: string;
+}
 export interface Bridge {
+  storyBuild: (
+    id: string,
+    options?: { chapters?: string[]; mode?: "build" | "complete" },
+  ) => Promise<StoryBuildProgress>;
+  decideStoryIssue: (
+    request: StoryIssueDecisionRequest,
+  ) => Promise<StoryEvents>;
+  storyEvents: (
+    id: string,
+    query?: StoryEventQuery,
+  ) => Promise<StoryEventView>;
   rewrite: (
     id: string,
     revision: number,

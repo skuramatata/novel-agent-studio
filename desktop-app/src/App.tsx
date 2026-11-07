@@ -12,12 +12,14 @@ import {
   Check,
   Brain,
   ScrollText,
+  Network,
 } from "lucide-react";
 import { useStudio } from "./state/StudioContext";
 import { Library } from "./features/Library";
 import { Chat } from "./features/Chat";
 import { Foundation } from "./features/Foundation";
 import { Relationships } from "./features/Relationships";
+import { StoryEvents } from "./features/StoryEvents";
 import { Reader } from "./features/Reader";
 import { Settings } from "./features/Settings";
 import { Memory } from "./features/Memory";
@@ -30,6 +32,7 @@ const tabs = [
   { id: "chat", label: "创作对话", icon: MessagesSquare },
   { id: "foundation", label: "作者与作品", icon: SlidersHorizontal },
   { id: "relations", label: "人物关系", icon: GitBranch },
+  { id: "events", label: "故事事件链", icon: Network },
   { id: "reader", label: "章节阅读", icon: BookOpen },
   { id: "memory", label: "故事记忆", icon: Brain },
   { id: "logs", label: "创作日志", icon: ScrollText },
@@ -189,6 +192,8 @@ export default function App() {
             <Foundation />
           ) : tab === "relations" ? (
             <Relationships />
+          ) : tab === "events" ? (
+            <StoryEvents />
           ) : tab === "memory" ? (
             <Memory />
           ) : tab === "logs" ? (

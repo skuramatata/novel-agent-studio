@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { memorySchema } from "./memory-schema.mjs";
+import {
+  storyEventsSchema,
+  storyEventsProposalSchema,
+} from "./story-events-schema.mjs";
 const text = z.string().max(100000);
 const short = z.string().max(4000);
 const id = z.string().min(1).max(100);
@@ -72,6 +76,7 @@ export const proposalSchema = z
   .object({
     summary: short,
     memory: memorySchema.optional(),
+    storyEvents: storyEventsProposalSchema.optional(),
     revisionScope: z.array(id).max(200).optional(),
     author: authorSchema.optional(),
     premise: premiseSchema.optional(),
@@ -115,6 +120,7 @@ export const projectSchema = z
     messages: z.array(messageSchema).max(500),
     demo: z.boolean(),
     memory: memorySchema.optional(),
+    storyEvents: storyEventsSchema.optional(),
   })
   .superRefine((p, ctx) => {
     const ids = new Set(p.characters.map((c) => c.id));
@@ -151,7 +157,7 @@ export function applyProposal(project, proposal, baseRevision) {
   if (project.revision !== baseRevision)
     throw new Error("作品已发生变化，这份候选已过期。请基于最新设定重新生成。");
   const parsed = proposalSchema.parse(proposal);
-  const { summary, revisionScope = [], ...patch } = parsed;
+  const { summary, revisionScope = [], storyEvents, ...patch } = parsed;
   const revisions = new Set(revisionScope);
   if (
     revisions.size !== revisionScope.length ||
@@ -160,9 +166,15 @@ export function applyProposal(project, proposal, baseRevision) {
     )
   )
     throw new Error("修订范围必须是已有正文的唯一章节ID。");
+  // 图合并在 runtime/story-events-apply.mjs；此文件被 renderer 引用，
+  // 不能引入 node:crypto 依赖链。只有已合并的完整图才写入作品；
+  // 增量补丁由调用方（Node 侧 accept 路径）先合并再提交。
+  const completeGraph =
+    storyEvents && storyEvents.version === 1 ? storyEvents : undefined;
   const result = projectSchema.parse({
     ...project,
     ...patch,
+    ...(completeGraph ? { storyEvents: completeGraph } : {}),
     revision: project.revision + 1,
   });
   for (const old of project.chapters) {

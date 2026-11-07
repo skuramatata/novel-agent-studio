@@ -45,8 +45,18 @@ import {
   addRecoveryMessage,
 } from "../runtime/review-workflow.mjs";
 import { memoryView } from "../runtime/memory.mjs";
+import {
+  emptyStoryEvents,
+  impactOf,
+  mergeStoryEvents,
+  normalizeStoryEvents,
+  setIssueDisposition,
+  storySubgraph,
+} from "../runtime/story-events.mjs";
 import { runAgent } from "../runtime/agent.mjs";
 import { applyProposal, projectSchema } from "../runtime/schema.mjs";
+import { resolveProposalStoryEvents } from "../runtime/story-events-apply.mjs";
+import { extractStoryEvents } from "../runtime/story-event-agent.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const buildInfo = JSON.parse(
   await readFile(join(root, "build-info.json"), "utf8"),
@@ -165,6 +175,169 @@ function publicConfigs(c) {
     ]),
   );
 }
+// 故事事件视图的唯一适配层：入参/出参均为可 JSON 序列化的纯数据。
+// renderer 不直接 import runtime（含 node:crypto），建图、失效传播与子图查询都在这里调纯函数。
+function storyEventsView(project, query = {}) {
+  const chapters = (project.chapters || []).map((c) => ({
+    id: c.id,
+    number: c.number,
+    title: c.title,
+    content: c.content,
+  }));
+  const warnings = [];
+  const raw = project.storyEvents;
+  let graph;
+  if (raw === undefined || raw === null) {
+    graph = emptyStoryEvents();
+    warnings.push(
+      "尚未建立事件链：这部作品还没有抽取过故事事件，事件图是空的，不代表故事里没有事件。",
+    );
+  } else {
+    // 已落盘的图在保存时已通过 storyEventsSchema 校验，读取时不再用空章节表重跑
+    // normalizeStoryEvents —— 那会把 explicit 边按“证据无法核对”丢弃，等于静默隐藏连线。
+    // 这里只做两件事：补齐缺省字段（老数据兼容）与按当前正文复算 stale。
+    graph = {
+      version: 1,
+      nodes: (raw.nodes || []).map((n) => ({
+        ...n,
+        review: n.review ?? { state: "unreviewed", note: "", at: null },
+        stale: n.stale ?? null,
+      })),
+      edges: (raw.edges || []).map((e) => ({
+        ...e,
+        review: e.review ?? { state: "unreviewed", note: "", at: null },
+        stale: e.stale ?? null,
+      })),
+      coverage: raw.coverage || [],
+      issues: raw.issues || [],
+    };
+    if (chapters.some((c) => c.content.trim()))
+      graph = impactOf(graph, { chapters }).storyEvents;
+  }
+  const candidateNodes = [];
+  const candidateEdges = [];
+  // R8-UI：候选自带的问题与正式图 graph.issues 分开存放，绝不合并。
+  const candidateIssues = [];
+  const missingEvidence = [];
+  const formalNodeIds = new Set(graph.nodes.map((n) => n.id));
+  const formalEdgeIds = new Set(graph.edges.map((e) => e.id));
+  let overlapping = 0;
+  for (const message of project.messages || []) {
+    if (message.status !== "pending") continue;
+    const patch = message.proposal?.storyEvents;
+    if (!patch) continue;
+    // R1：预览也用"候选最终正文视图"核验引文，与采纳路径同源。
+    // 否则空白章候选在预览里看不到事件，采纳后却能出现，前后不一致。
+    const previewChapters = proposedChapters(project, message.proposal).map(
+      (c) => ({
+        id: c.id,
+        number: c.number,
+        title: c.title,
+        content: c.content,
+      }),
+    );
+    // 候选增量只有内容与原文依据，id/章号/章名一律由 runtime 分配，
+    // 因此从空图起调用 mergeStoryEvents，不把候选混进正式图。
+    const built = mergeStoryEvents(emptyStoryEvents(), patch.nodes || [], {
+      chapters: previewChapters.filter((c) => c.content.trim()),
+      edges: patch.edges || [],
+    });
+    for (const node of built.storyEvents.nodes) {
+      if (formalNodeIds.has(node.id)) {
+        overlapping += 1;
+        continue;
+      }
+      candidateNodes.push({
+        ...node,
+        origin: { messageId: message.id, model: message.model || "" },
+      });
+    }
+    for (const edge of built.storyEvents.edges) {
+      if (formalEdgeIds.has(edge.id)) {
+        overlapping += 1;
+        continue;
+      }
+      candidateEdges.push({ ...edge, origin: { messageId: message.id } });
+    }
+    // 候选问题来自 proposal.storyEvents.issues。
+    // issue.nodeIds 可能指向本次候选新事件，也可能指向已有正式历史事件（跨章问题），
+    // 因此先查候选图，再退回正式图；两边都没有才留空并在下方提示。
+    const evidenceByNode = new Map(
+      built.storyEvents.nodes.map((n) => [n.id, n.evidence]),
+    );
+    for (const node of graph.nodes)
+      if (!evidenceByNode.has(node.id))
+        evidenceByNode.set(node.id, node.evidence);
+    for (const issue of patch.issues || []) {
+      if (!issue || typeof issue.id !== "string") continue;
+      const evidence = (issue.nodeIds || [])
+        .map((nodeId) => evidenceByNode.get(nodeId))
+        .filter(Boolean);
+      if ((issue.nodeIds || []).length > 0 && evidence.length === 0)
+        missingEvidence.push(issue.id);
+      candidateIssues.push({
+        ...issue,
+        origin: { messageId: message.id, model: message.model || "" },
+        evidence,
+      });
+    }
+  }
+  if (missingEvidence.length > 0)
+    warnings.push(
+      `有 ${missingEvidence.length} 条候选问题引用了当前事件图与候选图中都不存在的事件，已保留问题但无法显示原文。`,
+    );
+  if (overlapping > 0)
+    warnings.push(
+      `有 ${overlapping} 条候选与现有正式事件重合，已按重合处理，不重复显示。`,
+    );
+  const focus = {
+    eventId: typeof query?.focusEventId === "string" ? query.focusEventId : null,
+    direction: ["up", "down", "both"].includes(query?.direction)
+      ? query.direction
+      : "both",
+    depth: Number.isInteger(query?.depth)
+      ? Math.min(Math.max(query.depth, 1), 6)
+      : 1,
+  };
+  let view = { nodes: graph.nodes, edges: graph.edges, seeds: [] };
+  if (focus.eventId && graph.nodes.some((n) => n.id === focus.eventId))
+    view = storySubgraph(graph, {
+      eventIds: [focus.eventId],
+      depth: focus.depth,
+      direction: focus.direction,
+    });
+  else if (focus.eventId)
+    warnings.push("要聚焦的事件不在当前事件图中，可能已被重新抽取替换。");
+  const coverageByChapter = new Map(
+    (graph.coverage || []).map((c) => [c.chapterId, c.status]),
+  );
+  return {
+    graph,
+    view,
+    candidates: {
+      nodes: candidateNodes,
+      edges: candidateEdges,
+      issues: candidateIssues,
+    },
+    chapters: (project.chapters || []).map((c) => ({
+      id: c.id,
+      number: c.number,
+      title: c.title,
+      hasContent: Boolean(c.content.trim()),
+      coverage: coverageByChapter.get(c.id) ?? null,
+    })),
+    focus,
+    counts: {
+      nodes: graph.nodes.length,
+      edges: graph.edges.length,
+      staleNodes: graph.nodes.filter((n) => n.stale).length,
+      staleEdges: graph.edges.filter((e) => e.stale).length,
+      candidates: candidateNodes.length,
+      issues: (graph.issues || []).filter((i) => i.disposition === "open").length,
+    },
+    warnings,
+  };
+}
 function handle(name, fn) {
   ipcMain.handle("studio:" + name, async (event, ...args) => {
     if (
@@ -183,6 +356,53 @@ function handle(name, fn) {
 }
 handle("load", (id) => serial(() => store.load(id)));
 handle("memory", (id) => serial(async () => memoryView(await store.load(id))));
+handle("story-events", (id, query) =>
+  serial(async () => storyEventsView(await store.load(id), query)),
+);
+// R9：只改问题处理状态，不改正文。未知 issueId / 非法 decision 一律抛错，不许静默写。
+const STORY_DECISIONS = ["kept", "dismissed", "author-decided"];
+handle("decide-story-issue", (request) =>
+  serial(async () => {
+    const { projectId, issueId, decision, expectedRevision } = request || {};
+    if (typeof projectId !== "string") throw Error("缺少作品标识");
+    if (typeof issueId !== "string" || !issueId)
+      throw Error("缺少问题标识");
+    if (!STORY_DECISIONS.includes(decision))
+      throw Error(
+        `处理决定必须是 ${STORY_DECISIONS.join("/")}，收到「${decision}」。`,
+      );
+    const p = await store.load(projectId);
+    if (Number.isInteger(expectedRevision) && p.revision !== expectedRevision)
+      throw Error("作品已发生变化，请重新载入后再处理问题。");
+    const graph = p.storyEvents;
+    if (!graph) throw Error("这部作品还没有事件图，无法处理问题。");
+    if (!(graph.issues || []).some((i) => i.id === issueId))
+      throw Error("问题不存在或已被重新抽取替换，请刷新后重试。");
+    const next = setIssueDisposition(graph, issueId, decision);
+    // 只许改 issues[i].disposition：nodes/edges/coverage 必须逐字不变，
+    // 才能确证这次操作没有动到事件图结构（进而没有借道改正文）。
+    const strip = (g) =>
+      JSON.stringify({
+        n: g.nodes || [],
+        e: g.edges || [],
+        c: g.coverage || [],
+      });
+    if (strip(next) !== strip(graph))
+      throw Error("内部错误：处理问题不应改动事件图或正文。");
+    // 正文同样复核：章节 id 与内容必须完全一致。
+    const manuscript = JSON.stringify(
+      p.chapters.map((c) => [c.id, c.content]),
+    );
+    const candidate = { ...p, storyEvents: next, projectId };
+    if (
+      JSON.stringify(candidate.chapters.map((c) => [c.id, c.content])) !==
+      manuscript
+    )
+      throw Error("内部错误：处理问题不应改动正文。");
+    const saved = await store.save(candidate, p.revision);
+    return saved.storyEvents;
+  }),
+);
 handle("logs", (id, options) =>
   serial(async () =>
     readCreationLogs(
@@ -306,13 +526,156 @@ handle("accept", (projectId, id) =>
     const m = p.messages.find((m) => m.id === id);
     if (!m?.proposal || m.status !== "pending")
       throw new Error("候选不存在或已经处理。");
-    const next = applyProposal(p, m.proposal, m.baseRevision);
+    // R1：用"候选最终正文视图"核验事件引文——新章填入候选正文，改稿章按候选内容替换。
+    // 否则空白章候选会出现正文可采纳、事件却因引文对不上旧正文而全丢。
+    const finalChapters = proposedChapters(p, m.proposal);
+    const merged = resolveProposalStoryEvents(
+      projectWithChapters(p, finalChapters),
+      m.proposal.storyEvents,
+    );
+    const next = applyProposal(
+      p,
+      merged ? { ...m.proposal, storyEvents: merged } : m.proposal,
+      m.baseRevision,
+    );
     next.messages = next.messages.map((x) =>
       x.id === id
         ? { ...x, status: "accepted", handledAt: new Date().toISOString() }
         : x,
     );
     return store.save({ ...next, projectId }, p.revision);
+  }),
+);
+// R1：候选最终正文视图 = 现有章节中被 proposal.chapters 覆盖的章用候选内容替换，其余原样。
+// 事件引文必须按这个视图核验，否则空白章候选会出现"正文能采纳、事件全被丢弃"。
+function proposedChapters(project, proposal) {
+  const incoming = new Map(
+    (proposal?.chapters || []).map((chapter) => [chapter.id, chapter]),
+  );
+  return (project.chapters || []).map((chapter) => {
+    const next = incoming.get(chapter.id);
+    if (!next) return chapter;
+    return {
+      ...chapter,
+      number: Number.isInteger(next.number) ? next.number : chapter.number,
+      title: typeof next.title === "string" ? next.title : chapter.title,
+      summary: typeof next.summary === "string" ? next.summary : chapter.summary,
+      content: typeof next.content === "string" ? next.content : chapter.content,
+    };
+  });
+}
+
+// 交给 runtime 的作品形状：正文换成最终视图，其余不动。
+function projectWithChapters(project, chapters) {
+  return { ...project, chapters };
+}
+
+// R7：历史建图的进度视图。只读作品，不触发抽取。
+function storyBuildProgress(project, options = {}) {
+  const mode = options?.mode === "complete" ? "complete" : "build";
+  const chapters = (project.chapters || []).map((c) => {
+    const coverage = (project.storyEvents?.coverage || []).find(
+      (entry) => entry.chapterId === c.id,
+    );
+    const eventCount = (project.storyEvents?.nodes || []).filter(
+      (n) => n.chapterId === c.id,
+    ).length;
+    return {
+      chapterId: c.id,
+      chapterNumber: c.number,
+      chapterTitle: c.title,
+      status: coverage?.status ?? "pending",
+      parts: coverage?.parts || [],
+      eventCount,
+      failure: coverage?.failure ?? null,
+    };
+  });
+  const counts = {
+    total: chapters.length,
+    extracted: chapters.filter((c) => c.status === "extracted").length,
+    partial: chapters.filter((c) => c.status === "partial").length,
+    failed: chapters.filter((c) => c.status === "failed").length,
+    pending: chapters.filter((c) => c.status === "pending").length,
+  };
+  const hasContent = (project.chapters || []).some((c) => c.content.trim());
+  const state =
+    counts.total === 0 || counts.extracted + counts.partial === 0
+      ? "idle"
+      : counts.extracted === counts.total
+        ? "complete"
+        : "partial";
+  return {
+    enabled: true,
+    state,
+    mode,
+    hasContent,
+    chapters,
+    counts,
+    failure: chapters.find((c) => c.failure)?.failure ?? null,
+    touchesManuscript: false,
+  };
+}
+
+// R7：对已采纳正文建立/补全派生事件图。只写 storyEvents，绝不改正文。
+// 模型请求由 options.ask 注入（本阶段禁止真实供应商）；未注入时明确报错而不是静默空跑。
+handle("story-build", (projectId, options) =>
+  serial(async () => {
+    if (typeof projectId !== "string") throw Error("缺少作品标识");
+    const p = await store.load(projectId);
+    const hasContent = (p.chapters || []).some((c) => c.content.trim());
+    if (!hasContent) throw Error("作品还没有已采纳正文，无法建立事件图。");
+    const ask = options?.ask;
+    if (typeof ask !== "function")
+      throw Error(
+        "建图需要模型请求通道。当前未提供可注入的 ask，请在测试或桌面流程中注入后再试。",
+      );
+    // 目标章：显式 chapterIds 优先；mode=complete 时只补未完成的章，不重做已抽取章。
+    const coverage = new Map(
+      (p.storyEvents?.coverage || []).map((e) => [e.chapterId, e.status]),
+    );
+    let chapterIds = Array.isArray(options?.chapters)
+      ? options.chapters
+      : undefined;
+    if (!chapterIds && options?.mode === "complete")
+      chapterIds = (p.chapters || [])
+        .filter((c) => c.content.trim())
+        .filter((c) => coverage.get(c.id) !== "extracted")
+        .map((c) => c.id);
+    const manuscript = JSON.stringify(
+      (p.chapters || []).map((c) => [c.id, c.content]),
+    );
+    const result = await extractStoryEvents(p, ask, {
+      chapterIds,
+      model: typeof options?.model === "string" ? options.model : "",
+      maxChars: Number.isInteger(options?.maxChars) ? options.maxChars : 4000,
+    });
+    if (
+      JSON.stringify((p.chapters || []).map((c) => [c.id, c.content])) !==
+      manuscript
+    )
+      throw Error("内部错误：建立事件图不应改动正文。");
+    // 作者已有的处理决定不能被重跑抹掉。
+    const decided = new Map(
+      (p.storyEvents?.issues || [])
+        .filter((i) => i.disposition && i.disposition !== "open")
+        .map((i) => [i.id, i.disposition]),
+    );
+    const storyEvents = {
+      ...result.storyEvents,
+      issues: (result.storyEvents.issues || []).map((issue) =>
+        decided.has(issue.id)
+          ? { ...issue, disposition: decided.get(issue.id) }
+          : issue,
+      ),
+    };
+    const saved = await store.save(
+      { ...p, storyEvents, projectId },
+      p.revision,
+    );
+    return {
+      ...storyBuildProgress(saved, options),
+      failures: result.failures || [],
+    };
   }),
 );
 handle("settings", async () => publicConfigs(await loadConfig()));

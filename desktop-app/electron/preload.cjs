@@ -2,6 +2,12 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("studio", {
   load: (id) => ipcRenderer.invoke("studio:load", id),
   memory: (id) => ipcRenderer.invoke("studio:memory", id),
+  storyEvents: (id, query) =>
+    ipcRenderer.invoke("studio:story-events", id, query),
+  decideStoryIssue: (request) =>
+    ipcRenderer.invoke("studio:decide-story-issue", request),
+  storyBuild: (id, options) =>
+    ipcRenderer.invoke("studio:story-build", id, options),
   task: (id) => ipcRenderer.invoke("studio:task", id),
   logs: (id, options) => ipcRenderer.invoke("studio:logs", id, options),
   logNode: (id, taskId, nodeId) =>

@@ -97,6 +97,71 @@ const preview: Bridge = {
     };
   },
   task: async () => null,
+  storyEvents: async (id, query) => {
+    const p = load(id);
+    const emptyGraph = { version: 1 as const, nodes: [], edges: [], coverage: [], issues: [] };
+    return {
+      graph: emptyGraph,
+      view: { nodes: [], edges: [], seeds: [] },
+      candidates: { nodes: [], edges: [], issues: [] },
+      chapters: p.chapters.map((c) => ({
+        id: c.id,
+        number: c.number,
+        title: c.title,
+        hasContent: Boolean(c.content.trim()),
+        coverage: null,
+      })),
+      focus: {
+        eventId: query?.focusEventId ?? null,
+        direction: query?.direction ?? "both",
+        depth: query?.depth ?? 1,
+      },
+      counts: {
+        nodes: 0,
+        edges: 0,
+        staleNodes: 0,
+        staleEdges: 0,
+        candidates: 0,
+        issues: 0,
+      },
+      warnings: [
+        "浏览器预览不读取故事事件链，请在桌面端查看；此处只展示章节覆盖占位。",
+      ],
+    };
+  },
+  // R7 预览降级：浏览器没有建图能力，不伪造进度，明确返回 unsupported。
+  storyBuild: async (id, options) => {
+    const p = load(id);
+    const chapters = p.chapters.map((c, i) => ({
+      chapterId: c.id,
+      chapterNumber: c.number,
+      chapterTitle: c.title,
+      status: "pending" as const,
+      parts: [],
+      eventCount: 0,
+      failure: null,
+    }));
+    return {
+      enabled: false,
+      state: "unsupported" as const,
+      mode: options?.mode === "complete" ? ("complete" as const) : ("build" as const),
+      hasContent: p.chapters.some((c) => Boolean(c.content.trim())),
+      chapters,
+      counts: {
+        total: chapters.length,
+        extracted: 0,
+        partial: 0,
+        failed: 0,
+        pending: chapters.length,
+      },
+      failure: "浏览器预览不支持建立事件图，请在桌面应用中操作。",
+      touchesManuscript: false as const,
+    };
+  },
+  // R9 预览降级：写操作必须失败得明确，不能假装已保存。
+  decideStoryIssue: async () => {
+    throw Error("处理问题决定需要写入作品，请在桌面应用中操作。");
+  },
   load: async (id) => load(id),
   list: async () =>
     library().entries.map((e) => ({
@@ -158,8 +223,14 @@ const preview: Bridge = {
     const p = load(projectId);
     const m = p.messages.find((m) => m.id === id);
     if (!m?.proposal || m.status !== "pending") throw Error("候选已处理");
+    // 浏览器预览不引入 node:crypto 依赖链：增量补丁在此不合并，
+    // 正式合并发生在 Node 侧（electron/main.mjs accept 路径）。
+    const proposal =
+      m.proposal?.storyEvents && !("version" in m.proposal.storyEvents)
+        ? { ...m.proposal, storyEvents: undefined }
+        : m.proposal;
     const n = {
-      ...applyProposal(p, m.proposal, m.baseRevision),
+      ...applyProposal(p, proposal, m.baseRevision),
       projectId,
     } as Project;
     n.messages = n.messages.map((x) =>

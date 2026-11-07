@@ -1,7 +1,7 @@
 {
-  "version": "0.1.111",
-  "displayVersion": "0.1.111+20260914.175032.159.f73852a203f0",
-  "builtAt": "2026-09-14T09:50:32.159Z",
-  "builtAtLabel": "2026-09-14 17:50:32 北京时间",
-  "sourceHash": "f73852a203f0"
+  "version": "0.1.160",
+  "displayVersion": "0.1.160+20261107.221303.780.a89c8c1ffd06",
+  "builtAt": "2026-11-07T14:13:03.780Z",
+  "builtAtLabel": "2026-11-07 22:13:03 北京时间",
+  "sourceHash": "a89c8c1ffd06"
 }

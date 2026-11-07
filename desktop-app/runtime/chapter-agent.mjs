@@ -41,6 +41,14 @@ import {
 import { sceneTimeSchema } from "./continuity-schema.mjs";
 import { retrieveContinuitySources, continuityLedger } from "./continuity.mjs";
 import { runDraftWork } from "./draft-agent.mjs";
+import { storyEventContextBlock } from "./story-event-context.mjs";
+import {
+  extractStoryEvents,
+  storyEventsForProposal,
+  checkStoryEvents,
+  knowledgeClaimsFrom,
+} from "./story-event-agent.mjs";
+import { resolveProposalStoryEvents } from "./story-events-apply.mjs";
 import {
   draftScenes,
   pauseDraft,
@@ -509,6 +517,25 @@ export async function runChapterAgent(
       .sort((a, b) => a.number - b.number)
       .at(-1)?.id;
     const writingContext = modelWritingContext(context, { recentChapterId });
+    // 事件链与界面共用同一份 storyEvents，只做只读投影，不改变既有生成顺序。
+    const storyContext = storyEventContextBlock(p, ch, {
+      instruction: req.instruction,
+    });
+    state.storyEventContext = storyContext.storyEvents;
+    if (storyContext.storyEvents.nodes.length || storyContext.storyEvents.edges.length)
+      appendCreationEvent(state, {
+        category: "memory",
+        status: "success",
+        title: "事件链上下文已载入",
+        details: {
+          事件: storyContext.storyEvents.nodes.length,
+          关系: storyContext.storyEvents.edges.length,
+          待核对: storyContext.storyEvents.staleCount,
+          覆盖: storyContext.storyEvents.coverage
+            .map((c) => `${c.chapterId}:${c.status}`)
+            .join(" "),
+        },
+      });
     state.manifest = manifest;
     if (context.memorySelection && !state.memorySelection) {
       state.memorySelection = context.memorySelection;
@@ -556,6 +583,7 @@ export async function runChapterAgent(
           role: "user",
           content: JSON.stringify({
             ...writingContext,
+            ...storyContext,
             targetWords: words,
             chapterWordRange: wordRange,
             ...(continuity
@@ -997,13 +1025,77 @@ export async function runChapterAgent(
           extractionOptions,
         ),
       );
+    // 本章事件增量随候选提交；正式 storyEvents 只在采纳后更新。
+    const storyEventsUpdate = await extractStoryEvents(
+      { ...candidate, storyEvents: p.storyEvents },
+      ask,
+      { chapterIds: [ch.id], model: config.model, signal },
+    ).catch((error) => {
+      appendCreationEvent(state, {
+        category: "memory",
+        status: "failed",
+        title: "本章事件抽取未完成",
+        details: { 原因: error.message },
+      });
+      return null;
+    });
+    // 缺口检查：由正文与事件链推出"未获知却表现为已知"，只形成待核对问题，不改正文。
+    const checkedPass = storyEventsUpdate
+      ? checkStoryEvents(
+          candidate,
+          storyEventsUpdate.storyEvents,
+          {
+            knowledgeClaims: knowledgeClaimsFrom(
+              candidate,
+              storyEventsUpdate.storyEvents,
+              ch.id,
+            ),
+          },
+        )
+      : null;
+    if (checkedPass) {
+      state.storyEventIssues = checkedPass.issues;
+      const pending = checkedPass.issues.filter((i) => i.disposition === "open");
+      if (pending.length)
+        appendCreationEvent(state, {
+          category: "memory",
+          status: "success",
+          title: "事件链待核对项已生成",
+          details: {
+            待核对: pending.length,
+            类型: pending.map((i) => i.kind).join("、"),
+          },
+        });
+    }
     const proposal = {
       summary: `第 ${ch.number} 章已独立完成，实测${actual}字 / 目标${words}字（允许${wordRange.min}—${wordRange.max}字），共${count}个场景，等待采纳。已通过字数检查、${continuity ? "历史原文回查、时间与事实专项审稿、" : ""}带证据审稿与段落补丁复核，文学质量仍需作者审阅。${reviewed.review.issues.length ? `另有${reviewed.review.issues.length}项非阻断疑点或建议，已保留在审稿记录中。` : ""}${targets.length > 1 ? `本次只交付首章；另外${targets.length - 1}章请采纳后在章节页逐章继续。` : ""}`,
       chapters,
       memory: { version: 1, entries },
+      ...(storyEventsUpdate
+        ? {
+            storyEvents: storyEventsForProposal(
+              checkedPass ?? storyEventsUpdate.storyEvents,
+              { chapterIds: [ch.id] },
+            ),
+          }
+        : {}),
       ...(ch.content ? { revisionScope: [ch.id] } : {}),
     };
-    applyProposal(p, proposal, p.revision);
+    applyProposal(
+      p,
+      {
+        ...proposal,
+        ...(proposal.storyEvents
+          ? {
+              storyEvents: resolveProposalStoryEvents(
+                p,
+                proposal.storyEvents,
+              ),
+            }
+          : {}),
+      },
+      p.revision,
+    );
     state.status = "ready";
     state.stage = "章节候选已完成";
     await save();
