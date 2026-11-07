@@ -57,6 +57,13 @@ import { runAgent } from "../runtime/agent.mjs";
 import { applyProposal, projectSchema } from "../runtime/schema.mjs";
 import { resolveProposalStoryEvents } from "../runtime/story-events-apply.mjs";
 import { extractStoryEvents } from "../runtime/story-event-agent.mjs";
+import {
+  previewStoryEvents,
+  resolveStoryEventAsk,
+  resolveStoryProvider,
+  storyBuildStatus,
+} from "./story-build-channel.mjs";
+import { resolveModelTransport } from "./model-transport.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const buildInfo = JSON.parse(
   await readFile(join(root, "build-info.json"), "utf8"),
@@ -236,12 +243,16 @@ function storyEventsView(project, query = {}) {
         content: c.content,
       }),
     );
-    // 候选增量只有内容与原文依据，id/章号/章名一律由 runtime 分配，
-    // 因此从空图起调用 mergeStoryEvents，不把候选混进正式图。
-    const built = mergeStoryEvents(emptyStoryEvents(), patch.nodes || [], {
+    // 候选增量只有内容与原文依据，id/章号/章名一律由 runtime 分配。
+    // F8：候选可以引用正式历史事件做关系端点（如第一章交钥匙→第二章开门）。
+    // previewStoryEvents 把正式图已有节点 id 作为已知端点传入临时视图，
+    // 让跨章边在预览中可见；它只读 formalNodes，绝不把候选写回正式图。
+    const preview = previewStoryEvents({
+      formalNodes: graph.nodes,
+      patch,
       chapters: previewChapters.filter((c) => c.content.trim()),
-      edges: patch.edges || [],
     });
+    const built = { storyEvents: preview.graph };
     for (const node of built.storyEvents.nodes) {
       if (formalNodeIds.has(node.id)) {
         overlapping += 1;
@@ -358,6 +369,15 @@ handle("load", (id) => serial(() => store.load(id)));
 handle("memory", (id) => serial(async () => memoryView(await store.load(id))));
 handle("story-events", (id, query) =>
   serial(async () => storyEventsView(await store.load(id), query)),
+);
+// F1：只读建图状态。绝不抽取、绝不调模型、绝不写作品。
+// 界面打开事件页走这条；只有作者点「建立/补全事件图」才走 story-build 执行。
+handle("story-build-status", (projectId, options) =>
+  serial(async () => {
+    if (typeof projectId !== "string") throw Error("缺少作品标识");
+    const p = await store.load(projectId);
+    return storyBuildStatus(p, options || {});
+  }),
 );
 // R9：只改问题处理状态，不改正文。未知 issueId / 非法 decision 一律抛错，不许静默写。
 const STORY_DECISIONS = ["kept", "dismissed", "author-decided"];
@@ -570,65 +590,31 @@ function projectWithChapters(project, chapters) {
   return { ...project, chapters };
 }
 
-// R7：历史建图的进度视图。只读作品，不触发抽取。
-function storyBuildProgress(project, options = {}) {
-  const mode = options?.mode === "complete" ? "complete" : "build";
-  const chapters = (project.chapters || []).map((c) => {
-    const coverage = (project.storyEvents?.coverage || []).find(
-      (entry) => entry.chapterId === c.id,
-    );
-    const eventCount = (project.storyEvents?.nodes || []).filter(
-      (n) => n.chapterId === c.id,
-    ).length;
-    return {
-      chapterId: c.id,
-      chapterNumber: c.number,
-      chapterTitle: c.title,
-      status: coverage?.status ?? "pending",
-      parts: coverage?.parts || [],
-      eventCount,
-      failure: coverage?.failure ?? null,
-    };
+// 模型传输接缝：正常桌面走全局 fetch。
+// 验收可在主进程内部替换：显式注入优先，其次读取 NOVEL_E2E_MODEL_STUB
+// 指向的替身文件（仅非打包环境生效，生产包完全忽略）。
+// 注入入口只存在于主进程内部，IPC 参数永不携带函数。
+async function modelTransport() {
+  const { fetch: transport } = await resolveModelTransport({
+    isPackaged: app.isPackaged,
   });
-  const counts = {
-    total: chapters.length,
-    extracted: chapters.filter((c) => c.status === "extracted").length,
-    partial: chapters.filter((c) => c.status === "partial").length,
-    failed: chapters.filter((c) => c.status === "failed").length,
-    pending: chapters.filter((c) => c.status === "pending").length,
-  };
-  const hasContent = (project.chapters || []).some((c) => c.content.trim());
-  const state =
-    counts.total === 0 || counts.extracted + counts.partial === 0
-      ? "idle"
-      : counts.extracted === counts.total
-        ? "complete"
-        : "partial";
-  return {
-    enabled: true,
-    state,
-    mode,
-    hasContent,
-    chapters,
-    counts,
-    failure: chapters.find((c) => c.failure)?.failure ?? null,
-    touchesManuscript: false,
-  };
+  return transport;
 }
 
-// R7：对已采纳正文建立/补全派生事件图。只写 storyEvents，绝不改正文。
-// 模型请求由 options.ask 注入（本阶段禁止真实供应商）；未注入时明确报错而不是静默空跑。
+// R7/F1：对已采纳正文建立/补全派生事件图。只写 storyEvents，绝不改正文。
+// 模型通道由主进程按当前供应商配置自行构造；IPC 不传函数，
+// 因此真实桌面按钮可用，而不是只有注入 ask 的测试路径能用。
 handle("story-build", (projectId, options) =>
   serial(async () => {
     if (typeof projectId !== "string") throw Error("缺少作品标识");
+    // 执行入口必须由界面显式声明模式；只读状态查询请走 story-build-status。
+    if (options?.mode !== "build" && options?.mode !== "complete")
+      throw Error(
+        "建立事件图需要显式模式（build 或 complete）。只查看进度请调用只读状态接口。",
+      );
     const p = await store.load(projectId);
     const hasContent = (p.chapters || []).some((c) => c.content.trim());
     if (!hasContent) throw Error("作品还没有已采纳正文，无法建立事件图。");
-    const ask = options?.ask;
-    if (typeof ask !== "function")
-      throw Error(
-        "建图需要模型请求通道。当前未提供可注入的 ask，请在测试或桌面流程中注入后再试。",
-      );
     // 目标章：显式 chapterIds 优先；mode=complete 时只补未完成的章，不重做已抽取章。
     const coverage = new Map(
       (p.storyEvents?.coverage || []).map((e) => [e.chapterId, e.status]),
@@ -644,9 +630,25 @@ handle("story-build", (projectId, options) =>
     const manuscript = JSON.stringify(
       (p.chapters || []).map((c) => [c.id, c.content]),
     );
+    // 供应商：显式字符串参数优先，否则自动选已配置的那个；参数必须可序列化。
+    const { provider, config } = resolveStoryProvider(
+      await loadConfig(),
+      typeof options?.provider === "string" ? options.provider : undefined,
+    );
+    // 注入只用于主进程内部验收，正常桌面路径不会带；两者走同一个业务入口。
+    const { ask, source } = resolveStoryEventAsk({
+      injected: typeof options?.ask === "function" ? options.ask : undefined,
+      config,
+      signal: undefined,
+      callComplete: async (cfg, messages, signal, fetcher, tokens) =>
+        complete(cfg, messages, signal, await modelTransport(), tokens),
+    });
     const result = await extractStoryEvents(p, ask, {
       chapterIds,
-      model: typeof options?.model === "string" ? options.model : "",
+      model:
+        typeof options?.model === "string"
+          ? options.model
+          : config.model || "",
       maxChars: Number.isInteger(options?.maxChars) ? options.maxChars : 4000,
     });
     if (
@@ -673,7 +675,9 @@ handle("story-build", (projectId, options) =>
       p.revision,
     );
     return {
-      ...storyBuildProgress(saved, options),
+      ...storyBuildStatus(saved, options),
+      provider,
+      channel: source,
       failures: result.failures || [],
     };
   }),
@@ -876,7 +880,8 @@ async function executeGenerate(req, controller) {
         send,
         checkpoint,
         checkpointState,
-        fetch,
+        // 同一个传输出口：正常桌面用全局 fetch，验收可在主进程内部替换。
+        await modelTransport(),
         { retrieval },
       );
     } finally {

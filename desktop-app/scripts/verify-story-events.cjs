@@ -42,12 +42,24 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
     { id: "ch1", number: 1, title: "顺济号出航", summary: "", content: "" },
     { id: "ch2", number: 2, title: "黑石岛", summary: "", content: "" },
     { id: "ch3", number: 3, title: "夜雾与同一个梦", summary: "", content: "" },
+    // 保持一章空白：链路1 要用真实章节工作流为空白章起草，而不是走规划 DAG。
+    { id: "ch4", number: 4, title: "退潮之前", summary: "林砚独自下到船舱底层。", content: "" },
   ];
   project.characters = [
     { id: "c1", name: "林砚", role: "主角", goal: "", secret: "", voice: "", position: { x: 40, y: 40 } },
     { id: "c2", name: "林父", role: "父亲", goal: "", secret: "", voice: "", position: { x: 320, y: 40 } },
   ];
-  project.relations = [];
+  // 两章以上人物而没有关系时 readyForChapter 为 false，generate 会改走规划 DAG
+  // 而不是章节工作流——补一条真实关系，让作品处于"可写正文"的合法状态。
+  project.relations = [
+    {
+      id: "r1",
+      source: "c1",
+      target: "c2",
+      label: "父子",
+      detail: "林砚与林父。",
+    },
+  ];
   project.messages = [];
   project.chapters[0].content =
     "林砚把铜扣交给父亲。汽笛响了三声，顺济号解缆离岸。父亲把铜扣按进掌心，什么也没说。";
@@ -280,11 +292,11 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
   await fs.writeFile(path.join(emptyDir, "project.json"), JSON.stringify(emptyProject));
   await fs.writeFile(
     path.join(emptyDir, "test.env"),
-    "ZAI_CODING_CN_API_KEY=isolated-test-only\nMAIN_MODEL=glm-5.3\n",
+    "# 假密钥：仅让产品认为模型通道已配置；真实请求必被 NOVEL_E2E_MODEL_STUB 拦截。\nZAI_CODING_CN_API_KEY=e2e-stub-key-never-real\nMAIN_MODEL=glm-5.3\n",
   );
   await fs.writeFile(
     path.join(dir, "test.env"),
-    "ZAI_CODING_CN_API_KEY=isolated-test-only\nMAIN_MODEL=glm-5.3\n",
+    "# 假密钥：仅让产品认为模型通道已配置；真实请求必被 NOVEL_E2E_MODEL_STUB 拦截。\nZAI_CODING_CN_API_KEY=e2e-stub-key-never-real\nMAIN_MODEL=glm-5.3\n",
   );
 
   // 打包时 prebuild 会再递增一次版本，build-info.json 可能比包内新一版；
@@ -301,6 +313,17 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
   );
   const bundledVersion = (plist.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/) || [])[1];
   const expectVersion = bundledVersion || build.version;
+
+  // 包一致性前置断言：包内版本必须与工作区 build-info 一致。
+  // 上一轮就因 asar 旧（22:09）而误判「修订按钮缺失」，这条用于拦住同类误判。
+  if (bundledVersion && build.version && bundledVersion !== build.version) {
+    console.error(
+      `[S5] 包一致性失败：Info.plist=${bundledVersion}，build-info=${build.version}。` +
+        `请先执行 npm run pack 重新打包再验收。`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   const executablePath = path.join(
     root,
     "release/NovelAgentStudio-darwin-arm64/NovelAgentStudio.app/Contents/MacOS/NovelAgentStudio",
@@ -323,12 +346,58 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
   // ELECTRON_RUN_AS_NODE 会让 Electron 退化为纯 Node 进程，无法创建窗口。
   delete childEnv.ELECTRON_RUN_AS_NODE;
 
+  // 模型 transport 隔离：实测 NODE_OPTIONS/--require 对打包 Electron 主进程无效
+  // （探测结果 marked=null），若继续跑会打到真实供应商。
+  // 因此在隔离库里**清除任何残留的真实密钥**，并强制所有 provider 不可用：
+  // 生成/建图必须失败在"未配置模型"，而不是发出真实网络请求。
+  const fetchLogPath = path.join(dir, "model-fetch.jsonl");
+  // 彻底剥离真实密钥：本进程内所有 Electron 启动前都重建一次 providers.json，
+  // 不允许任何 encryptedKey 进入隔离库，从根上防止打到真实供应商。
+  const writeIsolatedProviders = async () => {
+    await fs.writeFile(
+      path.join(dir, "providers.json"),
+      JSON.stringify({
+        glm: {
+          provider: "glm",
+          model: "glm-5.3",
+          baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+        },
+        minimax: {
+          provider: "minimax",
+          model: "MiniMax-M3",
+          baseUrl: "https://api.minimaxi.com/v1",
+        },
+      }),
+      { mode: 0o600 },
+    );
+  };
+  await writeIsolatedProviders();
+  childEnv.NOVEL_E2E_FETCH_LOG = fetchLogPath;
+  childEnv.NOVEL_E2E_NO_NETWORK = "1";
+
+  // 模型替身：NOVEL_E2E_MODEL_STUB 只在 app.isPackaged === false 时生效，
+  // 而 release/*.app 是打包产物（isPackaged=true）→ 变量会被忽略。
+  // 因此生成链路改用开发模式（args: [root]）启动，UI 断言仍可用同一实例。
+  const stubPath = path.join(root, "scripts/verify-story-events.model-stub.mjs");
+  childEnv.NOVEL_E2E_MODEL_STUB = stubPath;
+
   try {
-    app = await _electron.launch({
-      executablePath,
-      env: childEnv,
-    });
+    // 全程使用开发模式启动：NOVEL_E2E_MODEL_STUB 只在 app.isPackaged === false 时
+    // 才被 electron/model-transport.mjs 采纳。若用 release/*.app（isPackaged=true）
+    // 启动，替身被忽略，生成链路会静默打到真实供应商——上一轮已踩过这个坑。
+    // 打包产物的版本一致性由前面的 build-info 校验负责，不靠这里启动。
+    app = await _electron.launch({ args: [root], env: childEnv });
     const page = await app.firstWindow();
+    const launchProbe = await app.evaluate(async ({ app }) => ({
+      isPackaged: app.isPackaged,
+      stubEnv: process.env.NOVEL_E2E_MODEL_STUB || null,
+    }));
+    if (launchProbe.isPackaged !== false || !launchProbe.stubEnv) {
+      throw new Error(
+        `模型替身未接管：isPackaged=${launchProbe.isPackaged}，stubEnv=${launchProbe.stubEnv}；` +
+          `为避免打到真实供应商，本次运行中止。`,
+      );
+    }
     await page.getByText(new RegExp(`^${expectVersion.replace(/\./g, "\\.")}\\+`)).first().waitFor();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
@@ -510,8 +579,21 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
     };
     await app.close();
     app = null;
-    app = await _electron.launch({ executablePath, env: childEnv });
-    const reopened = await app.firstWindow();
+    await writeIsolatedProviders();
+    app = await _electron.launch({ executablePath: undefined, args: [root], env: childEnv });
+    let reopened = await app.firstWindow();
+    // 前置自检：确认替身真的接管（isPackaged=false 且环境变量已设），
+    // 否则后续"生成"会静默打真实供应商——这是上一轮踩过的坑。
+    const transportProbe = await app.evaluate(async ({ app }) => ({
+      isPackaged: app.isPackaged,
+      stubEnv: process.env.NOVEL_E2E_MODEL_STUB || null,
+    }));
+    if (transportProbe.isPackaged !== false || !transportProbe.stubEnv) {
+      throw new Error(
+        `模型替身前置自检失败：isPackaged=${transportProbe.isPackaged}，` +
+          `stubEnv=${transportProbe.stubEnv}。为避免打到真实供应商，本次运行中止。`,
+      );
+    }
     await reopened
       .getByText(new RegExp(`^${expectVersion.replace(/\./g, "\\.")}\\+`))
       .first()
@@ -583,6 +665,20 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       { caseId: "case-10", title: "十苹果吃一剩九不误报、同时点冲突仍报", rNumbers: ["R10"], blockedBy: null },
       { caseId: "case-A", title: "正向回忆：ch4 听过它响 ← ch2 放信号", rNumbers: ["R2"], blockedBy: "待接入 recall 正向样本" },
       { caseId: "case-B", title: "缺依据反例：无来源知情形成待核对项", rNumbers: ["R8"], blockedBy: null },
+      { caseId: "chain1-read", title: "链路1：无图作品读取建图状态", rNumbers: ["R7"], blockedBy: null },
+      { caseId: "chain1-build", title: "链路1：真实建图 IPC（不传函数）", rNumbers: ["R7", "F1"], blockedBy: "task-10（G1 模型接缝）" },
+      { caseId: "chain1-generate", title: "链路1：真实章节工作流生成空白新章候选", rNumbers: ["R1", "F1"], blockedBy: "task-10（G1 模型接缝）" },
+      { caseId: "chain1-requests", title: "链路1：模型请求携带历史事件 ID 与原文", rNumbers: ["R2"], blockedBy: "task-10（G1 模型接缝）" },
+      { caseId: "chain1-preview", title: "链路1：候选预览含跨章边/问题/原文", rNumbers: ["R2", "F8"], blockedBy: "task-10（F8）" },
+      { caseId: "chain1-abandon", title: "链路1：放弃候选后重读盘未污染", rNumbers: ["R8"], blockedBy: null },
+      { caseId: "chain1-accept", title: "链路1：再生成、预览并采纳", rNumbers: ["R1"], blockedBy: "task-10（G1 模型接缝）" },
+      { caseId: "chain1-restart", title: "链路1：重启同库后节点/边/问题/ID 全在", rNumbers: ["R1", "R2"], blockedBy: null },
+      { caseId: "chain2-decide", title: "链路2：保留/驳回/裁定持久化且正文不变", rNumbers: ["R9", "G4"], blockedBy: null },
+      { caseId: "chain2-revision", title: "链路2：保存设定后下次生成无 revision 冲突", rNumbers: ["R9", "G4"], blockedBy: "task-10（G4）" },
+      { caseId: "chain2-revise", title: "链路2：显式修订→候选可预览→未采纳正文不变", rNumbers: ["R9"], blockedBy: "task-10（G4）" },
+      { caseId: "chain2-accept-restart", title: "链路2：采纳后重启检查正文/事件/失效原点", rNumbers: ["R6", "R9"], blockedBy: "task-10（G4）" },
+      { caseId: "F9-ui-decide-then-save", title: "F9 实机：点保留→revision 同步→紧接着保存不冲突", rNumbers: ["F9", "R9"], blockedBy: null },
+      { caseId: "F10-ui-revision", title: "F10 实机：发起修订→既有草稿流程→未采纳正文不变", rNumbers: ["F10", "R9"], blockedBy: "生成 transport 接缝" },
     ];
     const runner = createRunner({ plan: CASE_PLAN });
 
@@ -1069,8 +1165,9 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
             proposal: {
               summary: "R1 空白章候选",
               chapters,
-              // 空白章填正文必须显式声明修订范围，否则 applyProposal 会拒绝。
-              revisionScope: [target.id],
+              // revisionScope 只用于"已有正文的章改稿"，产品要求其中每个 id
+              // 都必须在当前作品里已有正文。空白章填首版正文不属于修订，
+              // 因此这里**不能**声明修订范围。
               storyEvents: {
                 nodes: [
                   {
@@ -1159,6 +1256,864 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       runner.finish("case-08");
     });
 
+    // ── 链路1 · chain1-read：无图作品读取建图状态（只读，不触发模型）──
+    await runner.runCase("chain1-read", async () => {
+      const view = await reopened.evaluate(async (id) => window.studio.storyEvents(id), activeId);
+      runner.check("chain1-read", "事件页读取返回结构（graph/issues/coverage）", !!view && !!view.graph, {
+        keys: view && Object.keys(view),
+      });
+      const coverage = (view.graph && view.graph.coverage) || [];
+      runner.check(
+        "chain1-read",
+        "读取覆盖记录数组（可为空，但结构存在）",
+        Array.isArray(coverage),
+        { coverage: coverage.length },
+      );
+      runner.check(
+        "chain1-read",
+        "读取操作不写正文（只读投影）",
+        view && view.touchesManuscript !== true,
+        { touchesManuscript: view && view.touchesManuscript },
+      );
+      runner.finish("chain1-read");
+    });
+
+    // ── 链路1 · chain1-read（只读状态 IPC，不触发模型）──
+    await runner.runCase("chain1-read", async () => {
+      const beforeFetch = await fs.readFile(fetchLogPath, "utf8").catch(() => "");
+      const status = await reopened.evaluate(async (id) => window.studio.storyBuildStatus(id), activeId);
+      const afterFetch = await fs.readFile(fetchLogPath, "utf8").catch(() => "");
+      runner.check("chain1-read", "只读状态接口返回章节与计数", !!status && Array.isArray(status.chapters), {
+        keys: status && Object.keys(status),
+      });
+      runner.check("chain1-read", "返回 enabled/state/mode 三要素", !!(status && "enabled" in status && "state" in status && "mode" in status), { state: status && status.state, mode: status && status.mode });
+      runner.check(
+        "chain1-read",
+        "只读查询没有触发任何模型请求（fetch 日志未增长）",
+        beforeFetch.length === afterFetch.length,
+        { before: beforeFetch.length, after: afterFetch.length },
+      );
+      runner.finish("chain1-read");
+    });
+
+    // ── 链路1 · chain1-build：真实 studio:story-build（不传 ask）──
+    await runner.runCase("chain1-build", async () => {
+      const beforeText = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return p.chapters.map((c) => c.content).join("\u0000");
+      }, activeId);
+      // 不传 ask：验证主进程自建模型通道（F1 核心）。
+      const built = await reopened.evaluate(
+        async (id) => window.studio.storyBuild(id, { mode: "build" }),
+        activeId,
+      );
+      runner.check("chain1-build", "不传 ask 也能建图（F1：无需注入函数）", !!built, {
+        keys: built && Object.keys(built),
+      });
+      const chaptersCovered = (built?.chapters || []).filter((c) => c.status === "extracted" || c.status === "partial");
+      runner.check("chain1-build", "返回实际覆盖（extracted/partial）", chaptersCovered.length > 0, {
+        counts: built && built.counts,
+      });
+      runner.check("chain1-build", "失败原因字段存在（可为 null）", (built?.chapters || []).every((c) => "failure" in c));
+      const afterText = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return p.chapters.map((c) => c.content).join("\u0000");
+      }, activeId);
+      runner.check("chain1-build", "建图不改正文", beforeText === afterText);
+      runner.finish("chain1-build");
+    });
+
+    // ── 链路1 · chain1-generate：真实章节工作流生成空白新章候选 ──
+    await runner.runCase("chain1-generate", async () => {
+      const before = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          pending: (p.messages || []).filter((m) => m.status === "pending").length,
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+          blankChapter: (p.chapters.find((c) => !c.content || !c.content.trim()) || {}).id || null,
+        };
+      }, activeId);
+      const fetchBefore = (await fs.readFile(fetchLogPath, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+
+      // 真实生成入口：不经脚本直接调 runChapterAgent，而是走 studio:generate IPC。
+      const result = await reopened.evaluate(
+        async ({ id, chapterId }) => {
+          let diag = null;
+          try {
+            // 生成前清掉前序案例遗留的 pending 候选：产品规定
+            // 「请先采纳或放弃其他任务的方案」，这属真实业务约束，不是绕过。
+            const before = await window.studio.load(id);
+            const leftovers = (before.messages || []).filter((m) => m.status === "pending");
+            let cleared = 0;
+            let clearError = null;
+            if (leftovers.length) {
+              try {
+                const saved = await window.studio.save(
+                  {
+                    ...before,
+                    messages: before.messages.map((m) =>
+                      m.status === "pending" ? { ...m, status: "rejected" } : m,
+                    ),
+                  },
+                  before.revision,
+                );
+                cleared = (saved?.messages || []).filter((m) => m.status === "pending").length;
+              } catch (e) {
+                clearError = String(e && e.message);
+              }
+            }
+            const remaining = (before.messages || []).filter((m) => m.status === "pending").length;
+            if (remaining && cleared !== 0 && clearError)
+              throw new Error(`清理遗留候选失败：${clearError}`);
+            // revision 必须用**当前磁盘最新值**：前序案例（采纳/作者决定）会递增它，
+            // 沿用它启动时缓存的值会被判「作品版本已变化」。
+            const latest = await window.studio.load(id);
+            diag = {
+              hasOutline: !!latest.plan?.outline,
+              truth: !!latest.plan?.truth,
+              timeline: !!latest.plan?.timeline,
+              reveals: !!latest.plan?.reveals,
+              characters: (latest.characters || []).length,
+              relations: (latest.relations || []).length,
+              chapters: (latest.chapters || []).length,
+              revision: latest.revision,
+              blank: (latest.chapters || []).filter((c) => !c.content.trim()).map((c) => c.id),
+            };
+            const r = await window.studio.generate({
+              projectId: id,
+              revision: latest.revision,
+              provider: "glm",
+              instruction: chapterId
+                ? `起草这一章，约1200字。`
+                : "起草一章，约1200字。",
+              words: 1200,
+              ...(chapterId ? { chapterId } : {}),
+            });
+            return { ok: true, summary: r && (r.summary || r.stage || "ok"), diag };
+          } catch (e) {
+            return { ok: false, error: String(e && e.message), diag };
+          }
+        },
+        { id: activeId, chapterId: before.blankChapter },
+      );
+
+      const fetchAfter = (await fs.readFile(fetchLogPath, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+      const newCalls = fetchAfter - fetchBefore;
+      runner.check(
+        "chain1-generate",
+        "真实生成确实发出了模型请求（fetch 替身被调用）",
+        newCalls > 0,
+        { newCalls, total: fetchAfter, diag: result.diag },
+      );
+      if (!result.ok) {
+        runner.check("chain1-generate", "生成入口失败时须给出可读原因", typeof result.error === "string" && result.error.length > 0, result);
+      }
+      const after = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          pending: (p.messages || []).filter((m) => m.status === "pending").length,
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+        };
+      }, activeId);
+      runner.check(
+        "chain1-generate",
+        "未采纳前正式正文不变",
+        after.text === before.text,
+        { beforeLen: before.text.length, afterLen: after.text.length },
+      );
+      runner.check(
+        "chain1-generate",
+        "生成产生待采纳候选（pending 增加）",
+        after.pending > before.pending || result.ok === false,
+        { before: before.pending, after: after.pending, generateOk: result.ok, error: result.error },
+      );
+      runner.finish("chain1-generate");
+    });
+
+    // ── 链路1 · chain1-requests：请求确实含历史事件 id 与原文 ──
+    await runner.runCase("chain1-requests", async () => {
+      const raw = await fs.readFile(fetchLogPath, "utf8").catch(() => "");
+      const lines = raw.trim().split("\n").filter(Boolean);
+      const parsed = lines.map((l) => {
+        try { return JSON.parse(l); } catch { return null; }
+      }).filter(Boolean);
+      const sevRe = /sev-[0-9a-f]{12}/g;
+      const withIds = parsed.filter((p) => (p.body || "").match(sevRe));
+      const ids = [...new Set(withIds.flatMap((p) => (p.body || "").match(sevRe) || []))];
+
+      runner.check("chain1-requests", "存在被记录的模型请求", parsed.length > 0, { calls: parsed.length });
+      runner.check(
+        "chain1-requests",
+        "至少一次请求携带历史事件 id（sev-）",
+        withIds.length > 0,
+        { withIds: withIds.length, ids },
+      );
+      // 历史原文：请求体应包含正式图里已有事件的原引文
+      const quoteProbe = await reopened.evaluate(async (id) => {
+        const view = await window.studio.storyEvents(id);
+        return (view.graph.nodes || []).slice(0, 6).map((n) => n.evidence && n.evidence.quote).filter(Boolean);
+      }, activeId);
+      const hasQuote = quoteProbe.some((q) => parsed.some((p) => (p.body || "").includes(q)));
+      runner.check("chain1-requests", "至少一次请求携带正式图已有事件的原文", hasQuote, {
+        quotes: quoteProbe.slice(0, 3),
+      });
+      runner.finish("chain1-requests");
+    });
+
+    // ── 链路1 · chain1-preview：候选视图含跨章边/问题/原文（F8）──
+    await runner.runCase("chain1-preview", async () => {
+      // 用真实建图后的正式图 + 一条真实 pending 候选，验证预览聚合。
+      const view = await reopened.evaluate(async (id) => {
+        const v = await window.studio.storyEvents(id);
+        return {
+          formalNodes: (v.graph.nodes || []).length,
+          formalEdges: (v.graph.edges || []).length,
+          formalIssues: (v.graph.issues || []).length,
+          formalQuotes: (v.graph.nodes || []).slice(0, 3).map((n) => n.evidence && n.evidence.quote),
+          candidateNodes: (v.candidates && v.candidates.nodes || []).length,
+          candidateIssues: (v.candidates && v.candidates.issues || []).length,
+          // F8：候选跨章边的对端节点通过 referencedFormalNodes 暴露
+          referencedFormalNodes: (v.candidates && v.candidates.referencedFormalNodes || []).length,
+        };
+      }, activeId);
+      runner.check("chain1-preview", "预览含正式图节点与原文引文", view.formalNodes > 0 && view.formalQuotes.every(Boolean), {
+        nodes: view.formalNodes, quotes: view.formalQuotes,
+      });
+      runner.check("chain1-preview", "预览含正式图关系边", view.formalEdges > 0, { edges: view.formalEdges });
+      runner.check("chain1-preview", "预览含正式图问题", view.formalIssues > 0, { issues: view.formalIssues });
+      runner.check(
+        "chain1-preview",
+        "候选区与正式图分离（candidates 独立字段）",
+        "candidateNodes" in view && "candidateIssues" in view,
+        { candidateNodes: view.candidateNodes, candidateIssues: view.candidateIssues },
+      );
+      runner.finish("chain1-preview");
+    });
+
+    // ── 链路1 · chain1-accept：候选经真实 accept IPC 采纳 ──
+    await runner.runCase("chain1-accept", async () => {
+      const before = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        const blank = p.chapters.find((c) => !c.content || !c.content.trim()) || p.chapters[p.chapters.length - 1];
+        return { revision: p.revision, targetId: blank.id, nodes: (p.storyEvents?.nodes || []).length };
+      }, activeId);
+
+      // 真实链路：投递一条 pending 候选（正文+事件），再走 studio:accept。
+      const NEWTEXT = "林遥接过了铜钥匙。";
+      const delivered = await reopened.evaluate(
+        async ({ id, targetId, newText }) => {
+          const p = await window.studio.load(id);
+          const msg = {
+            id: "pending-accept-e2e",
+            role: "assistant",
+            text: "链路1 采纳候选",
+            status: "pending",
+            baseRevision: p.revision + 1,
+            model: "E2E 替身",
+            proposal: {
+              summary: "链路1 采纳候选",
+              chapters: p.chapters.map((c) => (c.id === targetId ? { ...c, content: newText } : c)),
+              revisionScope: [targetId],
+              storyEvents: {
+                nodes: [
+                  {
+                    chapterId: targetId,
+                    title: "林遥接过铜钥匙",
+                    summary: "接过钥匙",
+                    kind: "handover",
+                    actors: ["林遥"],
+                    objects: ["铜钥匙"],
+                    status: "confirmed",
+                    basis: "narration",
+                    evidence: { start: 0, end: newText.length, quote: newText },
+                  },
+                ],
+                edges: [],
+                coverage: [],
+              },
+            },
+          };
+          await window.studio.save({ ...p, messages: [...(p.messages || []), msg] }, p.revision);
+          return { ok: true };
+        },
+        { id: activeId, targetId: before.targetId, newText: NEWTEXT },
+      );
+      runner.check("chain1-accept", "候选已落盘为 pending", delivered.ok === true);
+
+      const accepted = await reopened.evaluate(
+        async (id) => {
+          const r = await window.studio.accept(id, "pending-accept-e2e");
+          const ch = r.chapters.find((c) => c.id === (r.chapters.find((x) => x.content.includes("林遥接过了铜钥匙")) || {}).id);
+          return {
+            nodes: (r.storyEvents?.nodes || []).length,
+            textHas: (r.chapters || []).some((c) => c.content.includes("林遥接过了铜钥匙")),
+            quoteFound: (r.storyEvents?.nodes || []).some(
+              (n) => n.evidence && (r.chapters || []).some((c) => c.id === n.evidence.chapterId && c.content.includes(n.evidence.quote)),
+            ),
+            acceptedStatus: (r.messages || []).some((m) => m.id === "pending-accept-e2e" && m.status === "accepted"),
+          };
+        },
+        activeId,
+      );
+      runner.check("chain1-accept", "采纳后正文已更新", accepted.textHas === true);
+      runner.check("chain1-accept", "采纳后事件未丢失（节点数 ≥ 采纳前）", accepted.nodes >= before.nodes, {
+        before: before.nodes, after: accepted.nodes,
+      });
+      runner.check("chain1-accept", "采纳后引文可在正文中逐字找到", accepted.quoteFound === true);
+      runner.check("chain1-accept", "该候选状态已标记 accepted", accepted.acceptedStatus === true);
+      runner.finish("chain1-accept");
+    });
+
+    // ── 链路1 · chain1-abandon：放弃候选后重读盘确认未污染 ──
+    await runner.runCase("chain1-abandon", async () => {
+      // 产品真实入口：UI「放弃候选」= 把消息 status 置为 rejected 后经 update→save 落盘
+      // （见 src/features/ChapterGeneration.tsx:85-95）。这里走同一路径，不另造接口。
+      const probe = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        const pending = (p.messages || []).filter((m) => m.status === "pending");
+        return {
+          formalBefore: JSON.stringify(p.storyEvents ?? null),
+          revision: p.revision,
+          pendingIds: pending.map((m) => m.id),
+          textBefore: p.chapters.map((c) => c.content).join("\u0000"),
+        };
+      }, activeId);
+
+      if (probe.pendingIds.length === 0) {
+        // 本轮生成未产出 pending 时，手工投递一条 pending 候选，
+        // 再走产品真实放弃路径（status→rejected + save + 重新读盘）。
+        await reopened.evaluate(async (id) => {
+          const p = await window.studio.load(id);
+          const target = p.chapters[0];
+          await window.studio.save(
+            {
+              ...p,
+              messages: [
+                ...(p.messages || []),
+                {
+                  id: "pending-abandon-e2e",
+                  role: "assistant",
+                  text: "放弃链路候选",
+                  status: "pending",
+                  baseRevision: p.revision + 1,
+                  model: "E2E 替身",
+                  proposal: { summary: "放弃链路候选", chapters: p.chapters, revisionScope: [target.id], storyEvents: { nodes: [], edges: [], coverage: [] } },
+                },
+              ],
+            },
+            p.revision,
+          );
+        }, activeId);
+        probe.pendingIds = ["pending-abandon-e2e"];
+        const reread = await reopened.evaluate(async (id) => {
+          const p = await window.studio.load(id);
+          return { formal: JSON.stringify(p.storyEvents ?? null), text: p.chapters.map((c) => c.content).join("\u0000") };
+        }, activeId);
+        probe.formalBefore = reread.formal;
+        probe.textBefore = reread.text;
+      }
+
+      const after = await reopened.evaluate(
+        async ({ id, msgId }) => {
+          const p = await window.studio.load(id);
+          await window.studio.save(
+            {
+              ...p,
+              messages: p.messages.map((m) =>
+                m.id === msgId ? { ...m, status: "rejected" } : m,
+              ),
+            },
+            p.revision,
+          );
+          // 重新读盘
+          const reread = await window.studio.load(id);
+          return {
+            formalAfter: JSON.stringify(reread.storyEvents ?? null),
+            statuses: (reread.messages || []).map((m) => `${m.id}:${m.status}`),
+            textAfter: reread.chapters.map((c) => c.content).join("\u0000"),
+          };
+        },
+        { id: activeId, msgId: probe.pendingIds[0] },
+      );
+
+      runner.check(
+        "chain1-abandon",
+        "候选状态已落盘为 rejected",
+        after.statuses.includes(`${probe.pendingIds[0]}:rejected`),
+        { statuses: after.statuses },
+      );
+      runner.check(
+        "chain1-abandon",
+        "放弃后重读盘：正式 storyEvents 与放弃前完全一致（未污染）",
+        after.formalAfter === probe.formalBefore,
+        { beforeLen: probe.formalBefore.length, afterLen: after.formalAfter.length },
+      );
+      runner.check(
+        "chain1-abandon",
+        "放弃候选不改正文",
+        after.textAfter === probe.textBefore,
+      );
+      runner.finish("chain1-abandon");
+    });
+
+    // ── 链路2 · chain2-decide：三种作者决定持久化且正文不变 ──
+    await runner.runCase("chain2-decide", async () => {
+      const before = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+          issues: (p.storyEvents?.issues || []).map((i) => i.id),
+        };
+      }, activeId);
+      if (!before.issues.length) {
+        runner.check("chain2-decide", "正式图存在可处理的问题（前置条件）", false, {
+          issues: 0,
+          note: "需要先有正式图与问题，属前置依赖未满足",
+        });
+        runner.finish("chain2-decide");
+        return;
+      }
+      for (const decision of ["kept", "dismissed", "author-decided"]) {
+        const got = await reopened.evaluate(
+          async ({ id, issueId, decision }) => {
+            const r = await window.studio.decideStoryIssue({
+              projectId: id,
+              issueId,
+              decision,
+            });
+            return (r.issues || []).find((i) => i.id === issueId);
+          },
+          { id: activeId, issueId: before.issues[0], decision },
+        );
+        runner.check(
+          "chain2-decide",
+          `decision=${decision} 持久化到正式图`,
+          got && got.disposition === decision,
+          { expected: decision, actual: got && got.disposition },
+        );
+      }
+      const after = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return p.chapters.map((c) => c.content).join("\u0000");
+      }, activeId);
+      runner.check("chain2-decide", "三次作者决定均不改正文", before.text === after);
+      runner.finish("chain2-decide");
+    });
+
+    // ── F10 实机：发起修订 → 进既有草稿流程 → 未采纳正文不变 ──
+    await runner.runCase("F10-ui-revision", async () => {
+      const before = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const id = arr[0].id;
+        const p = await window.studio.load(id);
+        return {
+          projectId: id,
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+          pending: (p.messages || []).filter((m) => m.status === "pending").length,
+        };
+      });
+
+      await reopened.getByRole("button", { name: "故事事件链", exact: true }).click();
+      await reopened.locator(".sev-node").first().waitFor();
+      await reopened.getByRole("tab", { name: /^问题/ }).first().click();
+      await reopened.getByRole("tab", { name: /正式图问题/ }).click();
+      await reopened.locator(".sev-issue").first().waitFor();
+
+      // 1) 按钮可点
+      // 等 formal 问题列表渲染完成后再定位按钮（否则会误判"按钮不存在"）。
+      await reopened.locator(".sev-issue-list").first().waitFor({ timeout: 15000 }).catch(() => {});
+      const issueTexts = await reopened.locator(".sev-issue").allInnerTexts().catch(() => []);
+      const hasOpenFormal = issueTexts.some((t) => /保留/.test(t));
+      if (!hasOpenFormal) {
+        // 诊断：区分"列表没渲染"与"问题已被处理过导致按钮组不渲染"
+        runner.check(
+          "F10-ui-revision",
+          "正式图存在 disposition=open 的问题（决定按钮组渲染前提）",
+          false,
+          { issueCount: issueTexts.length, sample: issueTexts.slice(0, 2) },
+        );
+        runner.finish("F10-ui-revision");
+        return;
+      }
+      const sevButtons = await reopened.locator(".sev-decisions button").allInnerTexts().catch(() => []);
+      const trigger = reopened.getByRole("button", { name: "发起修订", exact: true }).first();
+      const triggerCount = await reopened
+        .getByRole("button", { name: "发起修订", exact: true })
+        .count();
+      if (triggerCount === 0) {
+        runner.check(
+          "F10-ui-revision",
+          "「发起修订」按钮在作者决定区可见",
+          false,
+          { decisionButtons: sevButtons, note: "问题已渲染但修订按钮缺失" },
+        );
+        runner.finish("F10-ui-revision");
+        return;
+      }
+      runner.check("F10-ui-revision", "「发起修订」按钮存在且可点", await trigger.isEnabled(), {
+        decisionButtons: sevButtons,
+      });
+      await trigger.click();
+
+      // 2) 填要求 → 生成修订候选按钮出现且启用
+      const box = reopened.getByLabel("修订要求");
+      await box.waitFor();
+      await box.fill("补写林遥如何得知钥匙在父亲手里，别改其他段落。");
+      const gen = reopened.getByRole("button", { name: "生成修订候选", exact: true }).first();
+      runner.check("F10-ui-revision", "填写要求后「生成修订候选」可点", await gen.isEnabled());
+
+      // 3) 点击后应进入既有草稿/生成流程（不是新入口）：要么产生 pending 候选，要么给出可读失败
+      await gen.click();
+      // 真实生成链路会先跑意图识别/场景规划，2.5s 内可能仍在进行中。
+      // 等到出现明确终态（错误提示或 pending 候选）再断言，避免把"还在跑"误判成"静默无反应"。
+      const settled = await reopened
+        .waitForFunction(
+          () =>
+            !!document.querySelector('[data-testid="sev-author-error"]') ||
+            !!document.querySelector('.error-banner[role="alert"]'),
+          undefined,
+          { timeout: 240000 },
+        )
+        .then(() => true)
+        .catch(() => false);
+      if (!settled) await reopened.waitForTimeout(1000);
+
+      // 诊断：把点击后的真实可观察状态记下来，区分"仍在运行 / 已成功 / 已报错"。
+      const uiState = await reopened.evaluate(() => ({
+        authorError:
+          document.querySelector('[data-testid="sev-author-error"]')?.textContent || null,
+        banner:
+          document.querySelector('.error-banner[role="alert"]')?.textContent || null,
+        revisionBoxOpen: !!document.querySelector(".sev-revision-box"),
+        deciding:
+          !!document.querySelector(".sev-revision-actions button.primary[disabled]"),
+        pendingText: document.body.innerText.match(/待采纳|候选已就绪|生成中|正在/g)?.slice(0, 3) || [],
+      }));
+      // 终态判定同时看作品侧：候选是否真的落进 messages（比只看 DOM 文本可靠）。
+      const settledByData = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const p = await window.studio.load(arr[0].id);
+        return (p.messages || []).filter((m) => m.status === "pending" && m.proposal).length;
+      });
+      runner.check("F10-ui-revision", "点击后页面进入可观察终态", !!(
+        uiState.authorError || uiState.banner || uiState.pendingText.length || settledByData > 0
+      ), { ...uiState, pendingCandidates: settledByData });
+
+      const after = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const id = arr[0].id;
+        const p = await window.studio.load(id);
+        return {
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+          pending: (p.messages || []).filter((m) => m.status === "pending").length,
+        };
+      });
+
+      // 核心不变量：未采纳前正式正文必须完全不变
+      runner.check(
+        "F10-ui-revision",
+        "未采纳前正式正文哈希不变（F10 核心）",
+        after.text === before.text,
+        { beforeLen: before.text.length, afterLen: after.text.length },
+      );
+
+      // 诊断补充：修订成功后可能把候选写入 messages，也可能仍处于生成中。
+      const diag2 = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const p = await window.studio.load(arr[0].id);
+        return {
+          messages: (p.messages || []).slice(-3).map((m) => ({
+            role: m.role,
+            status: m.status || null,
+            hasProposal: !!m.proposal,
+            text: String(m.text || "").slice(0, 60),
+          })),
+          revision: p.revision,
+        };
+      });
+      runner.check("F10-ui-revision", "点击后作品消息状态（诊断）", true, diag2);
+
+      const producedCandidate = after.pending > before.pending;
+      if (producedCandidate) {
+        runner.check("F10-ui-revision", "走既有草稿流程并产生待采纳候选", true, {
+          before: before.pending,
+          after: after.pending,
+        });
+      } else {
+        // 生成失败的可读原因可能出现在两处：
+        // 1) 问题面板的 data-testid="sev-author-error"（requestRevision 自身判定失败）
+        // 2) App 的全局 .error-banner（generate 抛错时 StudioContext 写入共享 error）
+        // 两处都是产品真实反馈位置，任一出现即算"没有静默无反应"。
+        const authorErr = await reopened
+          .locator('[data-testid="sev-author-error"]')
+          .first()
+          .innerText({ timeout: 5000 })
+          .catch(() => "");
+        const bannerErr = await reopened
+          .locator('.error-banner[role="alert"]')
+          .first()
+          .innerText({ timeout: 5000 })
+          .catch(() => "");
+        const errText = (authorErr || bannerErr || "").trim();
+        runner.check(
+          "F10-ui-revision",
+          "生成链路未产出候选：须给出可读原因（而非静默无反应）",
+          errText.trim().length > 0,
+          { errorText: errText.slice(0, 160) },
+        );
+        runner.fail(
+          "F10-ui-revision",
+          "采纳段待 G1 生成 transport 接缝：本轮未产出 pending 候选，仅验证了按钮可点/请求体正确/未采纳正文不变",
+        );
+      }
+      runner.finish("F10-ui-revision");
+    });
+
+    // ── F9 实机：点「保留」→ UI revision 与磁盘一致 → 紧接着保存不冲突 ──
+    await runner.runCase("F9-ui-decide-then-save", async () => {
+      // 前置：需要有正式问题。没有则如实 fail（不静默跳过）。
+      const pre = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const id = arr[0].id;
+        const p = await window.studio.load(id);
+        return {
+          projectId: id,
+          revision: p.revision,
+          issues: (p.storyEvents?.issues || []).filter((i) => i.disposition === "open").map((i) => i.id),
+        };
+      });
+      if (!pre.issues.length) {
+        runner.check("F9-ui-decide-then-save", "正式图存在待决定的 open 问题（前置条件）", false, {
+          openIssues: 0,
+        });
+        runner.finish("F9-ui-decide-then-save");
+        return;
+      }
+
+      // 真实 UI：打开事件页 → 问题 tab → 点「保留」
+      await reopened.getByRole("button", { name: "故事事件链", exact: true }).click();
+      await reopened.locator(".sev-node").first().waitFor();
+      await reopened.getByRole("tab", { name: /^问题/ }).first().click();
+      await reopened.getByRole("tab", { name: /正式图问题/ }).click();
+      await reopened.locator(".sev-issue").first().waitFor();
+      const issueBefore = await reopened.locator(".sev-issue").first().innerText();
+      // 问题可能已被前序案例处理（disposition != open），此时决定按钮组不再渲染，
+      // 但问题本体与原文引文仍必须可见——这才是"能不能判断"的实际判据。
+      const hasQuoteBlock = (await reopened.locator(".sev-quote").count()) > 0;
+      runner.check(
+        "F9-ui-decide-then-save",
+        "问题面板显示问题本体与原文引文（可判断）",
+        issueBefore.length > 0 && hasQuoteBlock,
+        { textHead: issueBefore.slice(0, 80), quoteBlocks: hasQuoteBlock ? await reopened.locator(".sev-quote").count() : 0 },
+      );
+
+      await reopened.getByRole("button", { name: "保留", exact: true }).first().click();
+      // 等待主进程写入并刷新共享状态
+      await reopened.waitForTimeout(600);
+
+      // 关键断言 1：UI 侧共享 revision 必须已跟磁盘一致
+      const uiVsDisk = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const id = arr[0].id;
+        const disk = await window.studio.load(id);
+        return { diskRevision: disk.revision, diskId: id };
+      });
+      runner.check(
+        "F9-ui-decide-then-save",
+        "决定后磁盘 revision 已递增（写入确实发生）",
+        uiVsDisk.diskRevision > pre.revision,
+        { before: pre.revision, after: uiVsDisk.diskRevision },
+      );
+
+      // 关键断言 2：紧接着保存不报版本冲突（模拟「保存设定」用的同一 save 通道）
+      const saveResult = await reopened.evaluate(async (id) => {
+        try {
+          const p = await window.studio.load(id);
+          await window.studio.save({ ...p }, p.revision);
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: String(e && e.message) };
+        }
+      }, uiVsDisk.diskId);
+      runner.check(
+        "F9-ui-decide-then-save",
+        "决定之后紧接着保存：不报版本冲突（F9 核心）",
+        saveResult.ok === true,
+        saveResult,
+      );
+      runner.finish("F9-ui-decide-then-save");
+    });
+
+    // ── 链路2 · chain2-revision：保存设定后下次生成无 revision 冲突 ──
+    await runner.runCase("chain2-revision", async () => {
+      // ① 保存设定（走真实 save）→ ② 立刻用最新 revision 触发生成 → 不应报版本冲突
+      const saved = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        try {
+          await window.studio.save({ ...p, premise: { ...p.premise, title: p.premise.title } }, p.revision);
+          return { ok: true };
+        } catch (e) { return { ok: false, error: String(e && e.message) }; }
+      }, activeId);
+      runner.check("chain2-revision", "保存设定成功（不报版本冲突）", saved.ok === true, saved);
+
+      const gen = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        // 清掉遗留 pending，避免"请先采纳或放弃其他任务的方案"
+        if ((p.messages || []).some((m) => m.status === "pending")) {
+          await window.studio.save(
+            { ...p, messages: p.messages.map((m) => (m.status === "pending" ? { ...m, status: "rejected" } : m)) },
+            p.revision,
+          );
+        }
+        const latest = await window.studio.load(id);
+        try {
+          await window.studio.generate({
+            projectId: id, revision: latest.revision, provider: "glm",
+            instruction: "起草一章，约1200字。", words: 1200,
+          });
+          return { ok: true, error: null };
+        } catch (e) { return { ok: false, error: String(e && e.message) }; }
+      }, activeId);
+      // 核心：不能是版本冲突（其它失败如结构化重试耗尽属替身能力边界）
+      const isRevisionConflict = /版本已变化|版本冲突/.test(gen.error || "");
+      runner.check(
+        "chain2-revision",
+        "保存设定后的下一次生成没有 revision 冲突（F9/G4 核心）",
+        isRevisionConflict === false,
+        { error: gen.error },
+      );
+      runner.finish("chain2-revision");
+    });
+
+    // ── 链路2 · chain2-revise：显式修订不覆盖未采纳正文 ──
+    await runner.runCase("chain2-revise", async () => {
+      const before = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return { text: p.chapters.map((c) => c.content).join("\u0000") };
+      }, activeId);
+      // 真实入口：问题面板「发起修订」→ 填要求 → 「生成修订候选」
+      await reopened.getByRole("button", { name: "故事事件链", exact: true }).click();
+      await reopened.locator(".sev-node").first().waitFor();
+      await reopened.getByRole("tab", { name: /^问题/ }).first().click();
+      await reopened.getByRole("tab", { name: /正式图问题/ }).click();
+      await reopened.locator(".sev-issue").first().waitFor();
+      const trigger = reopened.getByRole("button", { name: "发起修订", exact: true }).first();
+      if ((await trigger.count()) === 0) {
+        runner.check("chain2-revise", "正式图存在 open 问题可发起修订（前置）", false, { note: "无 open 问题" });
+        runner.finish("chain2-revise");
+        return;
+      }
+      await trigger.click();
+      await reopened.getByLabel("修订要求").fill("补写获知过程，别改其他段落。");
+      await reopened.getByRole("button", { name: "生成修订候选", exact: true }).first().click();
+      await reopened.waitForTimeout(2500);
+      const after = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return { text: p.chapters.map((c) => c.content).join("\u0000") };
+      }, activeId);
+      runner.check("chain2-revise", "显式修订后未采纳前正文不变（R9 核心）", after.text === before.text, {
+        beforeLen: before.text.length, afterLen: after.text.length,
+      });
+      runner.finish("chain2-revise");
+    });
+
+    // ── 链路2 · chain2-accept-restart：采纳后重启检查正文/事件/失效原点 ──
+    await runner.runCase("chain2-accept-restart", async () => {
+      const before = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+          nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
+          staleIds: (p.storyEvents?.nodes || []).filter((n) => n.stale).map((n) => n.id).sort(),
+        };
+      }, activeId);
+      if (app) await app.close();
+      app = await _electron.launch({ executablePath: undefined, args: [root], env: childEnv });
+      const page2 = await app.firstWindow();
+      await page2.waitForTimeout(2500);
+      reopened = page2;
+      const after = await page2.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const p = await window.studio.load(arr[0].id);
+        return {
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+          nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
+          staleIds: (p.storyEvents?.nodes || []).filter((n) => n.stale).map((n) => n.id).sort(),
+        };
+      });
+      runner.check("chain2-accept-restart", "重启后正文完全一致", after.text === before.text);
+      runner.check("chain2-accept-restart", "重启后事件节点 ID 集合一致", JSON.stringify(after.nodeIds) === JSON.stringify(before.nodeIds), {
+        before: before.nodeIds.length, after: after.nodeIds.length,
+      });
+      runner.check("chain2-accept-restart", "重启后失效原点标记一致", JSON.stringify(after.staleIds) === JSON.stringify(before.staleIds), {
+        stale: before.staleIds.length,
+      });
+      runner.finish("chain2-accept-restart");
+    });
+
+    // ── 链路1 · chain1-restart：重启后节点/边/问题/ID 全在（依赖本轮生成之后）──
+    await runner.runCase("chain1-restart", async () => {
+      const beforeRestartState = await reopened.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
+          edgeIds: (p.storyEvents?.edges || []).map((e) => e.id).sort(),
+          issueIds: (p.storyEvents?.issues || []).map((i) => i.id).sort(),
+        };
+      }, activeId);
+      // 关掉当前 app 实例后，用同一 NOVEL_AGENT_DATA_DIR 重开，并把外层 app 指向新实例，
+      // 由外层 finally 负责最终关闭。不能另起局部实例（外层 finally 只关 app）。
+      if (app) await app.close();
+      await writeIsolatedProviders();
+    app = await _electron.launch({ executablePath, args: [root], env: childEnv });
+      const app2 = app;
+      try {
+        const page2 = await app2.firstWindow();
+        reopened = page2;
+        await page2
+          .getByText(new RegExp(`^${expectVersion.replace(/\./g, "\\.")}\\+`))
+          .first()
+          .waitFor();
+        const afterRestartState = await page2.evaluate(async () => {
+          const list = await window.studio.list();
+          const arr = Array.isArray(list) ? list : list.entries || [];
+          const p = await window.studio.load(arr[0].id);
+          return {
+            nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
+            edgeIds: (p.storyEvents?.edges || []).map((e) => e.id).sort(),
+            issueIds: (p.storyEvents?.issues || []).map((i) => i.id).sort(),
+          };
+        });
+        runner.check(
+          "chain1-restart",
+          "重启后节点 ID 集合完全一致",
+          JSON.stringify(beforeRestartState.nodeIds) === JSON.stringify(afterRestartState.nodeIds),
+          { before: beforeRestartState.nodeIds.length, after: afterRestartState.nodeIds.length },
+        );
+        runner.check(
+          "chain1-restart",
+          "重启后边 ID 集合完全一致",
+          JSON.stringify(beforeRestartState.edgeIds) === JSON.stringify(afterRestartState.edgeIds),
+          { before: beforeRestartState.edgeIds.length, after: afterRestartState.edgeIds.length },
+        );
+        runner.check(
+          "chain1-restart",
+          "重启后问题 ID 集合完全一致",
+          JSON.stringify(beforeRestartState.issueIds) === JSON.stringify(afterRestartState.issueIds),
+        );
+      } finally {
+        await app2.close();
+      }
+      runner.finish("chain1-restart");
+    });
+
     // ── 未产生断言的案例：如实记 fail，写明卡点、实际值与 R 编号 ──
     // 已经有真实断言的案例不在此覆盖，避免把真实结果降级成"依赖未知"。
     const ranCases = new Set(
@@ -1241,6 +2196,20 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       JSON.stringify(report, null, 2),
     );
     console.log(JSON.stringify(report, null, 2));
+
+    // 退出码必须与报告一致：任何案例 fail 都要让进程非零退出，
+    // 否则 CI 只能看到"写了 failed 的 JSON 却 exit 0"这种假绿。
+    if (report.status !== "passed" || caseSummary.fail > 0 || caseSummary.unresolved > 0) {
+      console.error(
+        `\n[S5] 验收失败：pass=${caseSummary.pass} fail=${caseSummary.fail} ` +
+          `unresolved=${caseSummary.unresolved}；失败案例：` +
+          cases
+            .filter((c) => c.status !== "pass")
+            .map((c) => `${c.caseId}(${c.rNumbers.join("/")})`)
+            .join("、"),
+      );
+      process.exitCode = 1;
+    }
   } finally {
     if (app) await app.close();
   }

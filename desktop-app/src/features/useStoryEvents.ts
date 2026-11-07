@@ -162,7 +162,7 @@ function matchesNode(node: StoryEventNode, filters: StoryFilters) {
 }
 
 export function useStoryEvents() {
-  const { project, busy } = useStudio();
+  const { project, busy, refresh, generate } = useStudio();
   const [view, setView] = useState<StoryEventView | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -222,7 +222,7 @@ export function useStoryEvents() {
     let alive = true;
     void (async () => {
       try {
-        const next = await bridge.storyBuild(project!.projectId);
+        const next = await bridge.storyBuildStatus(project!.projectId);
         if (alive) {
           setBuild(next);
           setBuildError("");
@@ -327,6 +327,10 @@ export function useStoryEvents() {
         setView((current) =>
           current ? { ...current, graph: next } : current,
         );
+        // F9：主进程已把改动写入作品并递增 revision。只更新局部图会让
+        // 共享 project 停留在旧 revision，后续保存/生成会被判版本冲突。
+        // 这里同步整份共享状态（含 revision 与 storyEvents），不绕过版本校验。
+        await refresh();
         return true;
       } catch (e) {
         setDecisionError((e as Error).message);
@@ -335,7 +339,52 @@ export function useStoryEvents() {
         setDeciding(false);
       }
     },
-    [project?.projectId],
+    [project?.projectId, refresh],
+  );
+
+  // F10：显式修订。组装请求后交给既有章节生成流程（s.generate + chapterId + words），
+  // 只产生草稿候选，未采纳不改正式正文；不新建绕过采纳的写入口。
+  const requestRevision = useCallback(
+    async (issue: StoryIssue, node: StoryEventNode | null, instruction: string) => {
+      const request = buildRevisionRequest(issue, node, instruction);
+      if (!request) {
+        setDecisionError("请填写修订要求，并选择一条有原文依据的问题。");
+        return false;
+      }
+      const words =
+        node && project
+          ? project.premise.chapterWords || 3000
+          : 3000;
+      const prompt = [
+        `修订第${request.chapterNumber}章（${request.chapterTitle}）。`,
+        `针对问题：${request.explanation}`,
+        request.suggestion ? `原建议：${request.suggestion}` : "",
+        `原文依据：「${request.evidence[0]?.quote ?? ""}」`,
+        `作者要求：${request.instruction}`,
+        "只按上述要求修订本章，不要改动其他章节。",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      // F10：不能只把 generate 的返回值原样抛回。generate 失败时只写共享 error，
+      // 问题面板读的是 decisionError，结果作者点了按钮却看不到任何反馈。
+      // 因此这里按返回值分支，把可读原因落到本页的错误位上。
+      // generate 内部按 current.current.revision 提交。若本页刚做过作者决定或采纳，
+      // 共享状态可能还没同步到磁盘真值，会以"作品版本已变化"失败。
+      // 先刷新一次共享作品，确保提交用的是最新 revision（不绕过版本校验）。
+      await refresh();
+      const started = await generate(prompt, {
+        chapterId: request.chapterId,
+        words,
+      });
+      if (!started) {
+        setDecisionError(
+          "未能生成修订候选：任务没有启动或已失败。请检查模型配置与当前是否有其他生成任务，或稍后重试。",
+        );
+        return false;
+      }
+      return true;
+    },
+    [project?.premise?.chapterWords, generate, refresh],
   );
 
   // R7：触发建图。失败不清空已有结果，也不重置作者决定（由主进程保证）。
@@ -391,5 +440,6 @@ export function useStoryEvents() {
     deciding,
     decisionError,
     decideIssue,
+    requestRevision,
   };
 }

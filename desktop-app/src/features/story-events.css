@@ -1124,3 +1124,43 @@
 .sev-issue .sev-quote {
   margin-top: 5px;
 }
+
+/* F10 显式修订入口 */
+.sev-revision-trigger {
+  border-style: dashed;
+}
+
+.sev-revision-box {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 7px;
+  padding: 9px 10px;
+  border: 1px dashed var(--accent);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.sev-revision-box label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sev-revision-box label > span {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.sev-revision-box textarea {
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.sev-revision-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}

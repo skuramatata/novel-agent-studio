@@ -80,13 +80,17 @@
 
 ## 历史建图
 
-对已采纳正文建立或补全派生事件图，入口是 `studio:story-build`。建图只写 `storyEvents`，写前比对章节正文，变化即拒绝；`mode=complete` 只补未抽取或未完成的章，不重做已抽取章；重试不会清空已成功结果，作者已作出的 disposition 按 issueId 原样回写。模型请求必须注入 `ask`，未注入时明确报错而不空跑，也不会调用真实供应商。未来章纲与未采纳候选不进入正式历史。
+对已采纳正文建立或补全派生事件图，入口是 `studio:story-build`。建图只写 `storyEvents`，写前比对章节正文，变化即拒绝；`mode=complete` 只补未抽取或未完成的章，不重做已抽取章；重试不会清空已成功结果，作者已作出的 disposition 按 issueId 原样回写。执行入口要求显式 `mode`（`build`/`complete`），否则报错提示改用只读接口。未来章纲与未采纳候选不进入正式历史。
+
+查询进度与"能否建图"走 `studio:story-build-status`：它只读作品、不调用模型、不写盘，与执行入口返回同一套进度结构，界面可复用同一套渲染。
+
+建图的模型通道由主进程按当前供应商配置自行构造，**不要求调用方经 IPC 注入函数**——Electron IPC 本身无法传函数，若把它当作产品前提，真实桌面的按钮将永远不可用。未配置供应商或 API Key 时报可读错误。验收需要在主进程模型接缝注入替身时，用 `NOVEL_E2E_MODEL_STUB` 指向替身文件；该变量**仅在非打包环境生效**，打包产物完全忽略它，加载失败直接抛错而不回落真实网络。
 
 ## 验证
 
-自动化测试 376 项通过（存量 312 未降）。其中 `tests/story-events.test.mjs` 30 项覆盖稳定 id、改名重排、多前因多分支、无效边拒绝、失效传播、覆盖记录、项目往返、R4 精确证据、R5 同段多事件、R6 改稿保留原点、R3 四操作不删边、knownNodeIds 三条与 disposition 安全化；`tests/story-event-workflow.test.mjs` 34 项覆盖逐章抽取、上下文装配与预算截断、候选隔离、增量与完整图两种采纳形态、真实入口的无来源知情、R2 跨章端点与请求携带历史事件、R10 数量语义正负例，以及 renderer 依赖链不含 `node:crypto`。
+自动化测试 405 项通过（存量 312 未降）。其中 `tests/story-events.test.mjs` 30 项覆盖稳定 id、改名重排、多前因多分支、无效边拒绝、失效传播、覆盖记录、项目往返、R4 精确证据、R5 同段多事件、R6 改稿保留原点、R3 四操作不删边、knownNodeIds 三条与 disposition 安全化；`tests/story-event-workflow.test.mjs` 34 项覆盖逐章抽取、上下文装配与预算截断、候选隔离、增量与完整图两种采纳形态、真实入口的无来源知情、R2 跨章端点与请求携带历史事件、R10 数量语义正负例，以及 renderer 依赖链不含 `node:crypto`。
 
-`scripts/verify-story-events.cjs` 通过真实 Electron IPC 驱动隔离作品，覆盖任务书十个回归案例及两个附加案例，共 12 案例 43 条断言，`status: passed`、`unresolved: 0`、`pageErrors: []`。脚本拆为主入口、`verify-story-events.fixtures.cjs`（隔离夹具、请求记录器、偏移自检）与 `verify-story-events.assert.cjs`（断言运行器，拒绝空跑与恒真）三部分。请求记录器实测捕获到 case-02 的抽取请求携带第一章事件 id 与原文（`hasHistoricalEventIds: true`）。重启验证在同一数据目录关窗重开，比对节点、边与 disposition 全量一致。报告与 11 张截图在 `verification/story-event-chain/`。
+`scripts/verify-story-events.cjs` 通过真实 Electron IPC 驱动隔离作品，覆盖任务书十个回归案例、两个附加案例与两条真实产品链路的 26 个案例步骤，`status: passed`、26/26、`pageErrors: []`、`fixtureEvidenceAudit.ok: true`、`restartVerified: true`。任一必需案例失败或未执行时进程退出码非零（已用注入必失败断言验证过）。脚本拆为主入口、`verify-story-events.fixtures.cjs`（隔离夹具、请求记录器、偏移自检）与 `verify-story-events.assert.cjs`（断言运行器，拒绝空跑与恒真）三部分。请求记录器实测捕获到 case-02 的抽取请求携带第一章事件 id 与原文（`hasHistoricalEventIds: true`）。重启验证在同一数据目录关窗重开，比对节点、边与 disposition 全量一致。报告与 11 张截图在 `verification/story-event-chain/`。
 
 state-break 只保留客观判据：同一物件的两条事件都给出数量词且数量不同才报告。早期实现用"标题不同 + 都是 state-change"判定互斥，会把正常叙事里的两次状态变化误报成矛盾，已删除该判据并补负向用例。代价是没有数量词的状态矛盾（如门开与门关）不再被规则层捕捉，交由专项审稿与作者判断，遵循宁可少报不可乱报。
 

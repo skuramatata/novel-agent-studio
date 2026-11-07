@@ -1316,3 +1316,545 @@ test("R3 四种操作串在同一条 explicit 边上，每一步之后边都必�
   assertEdgeAlive(graph, "④处理问题");
   assert.equal(graph.issues[0].disposition, "dismissed");
 });
+
+test("F5 同一句内两次不同交接保留两个事件身份与连线", () => {
+  const content = "甲把钥匙交给乙，乙又把钥匙交给丙。";
+  const chapter = {
+    id: "ch-f5",
+    number: 1,
+    title: "钥匙转手",
+    summary: "",
+    content,
+  };
+  // 两次交接共用整句引文（不得改成两段不重叠引文来规避）。
+  const wholeQuote = content;
+  const make = (title, actors, objects) => ({
+    chapterId: "ch-f5",
+    title,
+    summary: "",
+    kind: "handover",
+    actors,
+    objects,
+    basis: "narration",
+    storyTime: "",
+    evidence: { start: 0, end: content.length, quote: wholeQuote },
+  });
+  const merged = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      make("甲把钥匙交给乙", ["甲", "乙"], ["钥匙"]),
+      make("乙把钥匙交给丙", ["乙", "丙"], ["钥匙"]),
+    ],
+    { chapters: [chapter] },
+  );
+  assert.equal(
+    merged.storyEvents.nodes.length,
+    2,
+    "同一句里的两次不同交接必须保留两个身份，实际：" +
+      JSON.stringify(merged.storyEvents.nodes.map((n) => n.title)),
+  );
+  const ids = merged.storyEvents.nodes.map((n) => n.id);
+  assert.equal(new Set(ids).size, 2, "两个事件不得复用同一个 ID");
+
+  // 两次交接之间应能建立关系，且端点指向各自事件而非同一个。
+  const linked = mergeStoryEvents(merged.storyEvents, [], {
+    chapters: [chapter],
+    edges: [
+      {
+        source: ids[0],
+        target: ids[1],
+        type: "state-transfer",
+        basis: "explicit",
+        explanation: "乙先接过钥匙，随后转交丙",
+        evidence: [
+          { chapterId: "ch-f5", start: 0, end: content.length, quote: wholeQuote },
+        ],
+      },
+    ],
+  }).storyEvents;
+  const cross = linked.edges.find(
+    (e) => e.source === ids[0] && e.target === ids[1],
+  );
+  assert.ok(cross, "第二次交接的关系必须建立");
+});
+
+test("F5 真正同一事件重抽仍不重复", () => {
+  const content = "甲把钥匙交给乙。";
+  const chapter = {
+    id: "ch-f5b",
+    number: 1,
+    title: "钥匙",
+    summary: "",
+    content,
+  };
+  const draft = {
+    chapterId: "ch-f5b",
+    title: "甲把钥匙交给乙",
+    summary: "",
+    kind: "handover",
+    actors: ["甲", "乙"],
+    objects: ["钥匙"],
+    basis: "narration",
+    storyTime: "",
+    evidence: { start: 0, end: content.length, quote: content },
+  };
+  const first = mergeStoryEvents(emptyStoryEvents(), [draft], {
+    chapters: [chapter],
+  }).storyEvents;
+  const second = mergeStoryEvents(first, [draft], { chapters: [chapter] });
+  assert.equal(second.storyEvents.nodes.length, 1, "同一事件重抽不得新增节点");
+  assert.equal(second.storyEvents.nodes[0].id, first.nodes[0].id);
+});
+
+// ---------------------------------------------------------------
+// G3（F6/F7/F2）：旧证据哈希必须保留、多证据失效原因取自实际失效那份、
+// 候选 issues 与作者处理状态必须随采纳落地。归属：翰林院编修 hanlin-bianxiu-2。
+// ---------------------------------------------------------------
+
+test("F6 空补丁采纳不得重盖旧哈希，改稿后的失效不得被抹成 0", async () => {
+  const { applyStoryEventPatch } = await import(
+    "../runtime/story-events-apply.mjs"
+  );
+  const text = "甲把钥匙交给乙。乙随后打开门。";
+  const before = [chapter("chF6", 1, "交接", text)];
+  const graph = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      {
+        chapterId: "chF6",
+        title: "甲把钥匙交给乙",
+        summary: "",
+        kind: "handover",
+        actors: ["甲", "乙"],
+        objects: ["钥匙"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(text, "甲把钥匙交给乙。"),
+      },
+    ],
+    { chapters: before },
+  ).storyEvents;
+  const establishedHash = graph.nodes[0].evidence.sourceHash;
+  assert.equal(graph.nodes[0].stale, null, "建立证据时不应 stale");
+
+  // 正文后追加一句：引文区间与引文本身都不变，只有整章哈希改变。
+  const changed = [
+    chapter("chF6", 1, "交接", text + "这是乙的幻想，实际并未发生。"),
+  ];
+  const project = { chapters: changed, storyEvents: graph };
+
+  const impact = impactOf(graph, project);
+  assert.equal(impact.staleNodeIds.length, 1, "改稿后应检出 1 个失效事件");
+
+  // 空补丁采纳：本轮没有任何新事件，绝不能把旧证据重新盖上当前哈希。
+  const applied = applyStoryEventPatch(project, { nodes: [], edges: [] });
+  assert.equal(
+    applied.nodes[0].evidence.sourceHash,
+    establishedHash,
+    "空补丁采纳不得把旧证据的 sourceHash 换成当前正文哈希",
+  );
+  assert.equal(
+    applied.nodes[0].evidence.quote,
+    "甲把钥匙交给乙。",
+    "旧证据引文不得被改写",
+  );
+  const after = impactOf(applied, project);
+  assert.equal(
+    after.staleNodeIds.length,
+    1,
+    "空补丁采纳后失效数不得变成 0（原缺陷正是重盖哈希消除失效）",
+  );
+  assert.ok(applied.nodes[0].stale, "旧节点必须保留 stale 标记");
+  assert.equal(
+    applied.nodes[0].stale.reason,
+    "source-changed",
+    "失效原因必须为正文已变更",
+  );
+});
+
+test("F6 无关章采纳同样不得刷新旧证据哈希", async () => {
+  const { applyStoryEventPatch } = await import(
+    "../runtime/story-events-apply.mjs"
+  );
+  const text = "甲把钥匙交给乙。乙随后打开门。";
+  const first = [chapter("chF6b", 1, "交接", text)];
+  const graph = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      {
+        chapterId: "chF6b",
+        title: "甲把钥匙交给乙",
+        summary: "",
+        kind: "handover",
+        actors: ["甲", "乙"],
+        objects: ["钥匙"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(text, "甲把钥匙交给乙。"),
+      },
+    ],
+    { chapters: first },
+  ).storyEvents;
+  const establishedHash = graph.nodes[0].evidence.sourceHash;
+  const changed = [
+    chapter("chF6b", 1, "交接", text + "这是乙的幻想，实际并未发生。"),
+    chapter("chF6c", 2, "第二章", "无关章节的正文。"),
+  ];
+  const project = { chapters: changed, storyEvents: graph };
+
+  // 采纳一个只在无关章节新增事件的补丁。
+  const applied = applyStoryEventPatch(project, {
+    nodes: [
+      {
+        chapterId: "chF6c",
+        title: "无关章节的另一件事",
+        summary: "",
+        kind: "action",
+        actors: ["丙"],
+        objects: [],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span("无关章节的正文。", "无关章节的正文。"),
+      },
+    ],
+    edges: [],
+  });
+  const target = applied.nodes.find((n) => n.chapterId === "chF6b");
+  assert.ok(target, "旧节点必须保留");
+  assert.equal(
+    target.evidence.sourceHash,
+    establishedHash,
+    "无关章采纳不得刷新旧证据哈希",
+  );
+  assert.equal(target.stale?.reason, "source-changed", "旧节点必须仍标 stale");
+});
+
+test("F7 后一份证据失效时 stale 原因与哈希必须取自实际失效那份", async () => {
+  const { applyStoryEventPatch } = await import(
+    "../runtime/story-events-apply.mjs"
+  );
+  const { storyEventsSchema } = await import(
+    "../runtime/story-events-schema.mjs"
+  );
+  const text1 = "甲把钥匙交给乙。乙随后打开门。";
+  const text2 = "门外下着雨。";
+  const before = [
+    chapter("chF7a", 1, "交接", text1),
+    chapter("chF7b", 2, "门外", text2),
+  ];
+  const base = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      {
+        chapterId: "chF7a",
+        title: "甲把钥匙交给乙",
+        summary: "",
+        kind: "handover",
+        actors: ["甲", "乙"],
+        objects: ["钥匙"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(text1, "甲把钥匙交给乙"),
+      },
+      {
+        chapterId: "chF7a",
+        title: "乙随后打开门",
+        summary: "",
+        kind: "action",
+        actors: ["乙"],
+        objects: ["门"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(text1, "乙随后打开门"),
+      },
+    ],
+    { chapters: before },
+  ).storyEvents;
+  const [handover, opening] = base.nodes;
+  const ev1 = { chapterId: "chF7a", ...span(text1, "甲把钥匙交给乙。乙随后打开门。") };
+  const ev2 = { chapterId: "chF7b", ...span(text2, "门外下着雨。") };
+  const withEdge = mergeStoryEvents(base, [], {
+    chapters: before,
+    edges: [
+      {
+        source: handover.id,
+        target: opening.id,
+        type: "causal",
+        basis: "explicit",
+        explanation: "拿到钥匙才开门",
+        evidence: [ev1, ev2],
+      },
+    ],
+  }).storyEvents;
+  assert.equal(withEdge.edges.length, 1, "双证据的边应建立成功");
+  assert.equal(withEdge.edges[0].evidence.length, 2, "边必须保留两份证据");
+  assert.equal(withEdge.edges[0].stale, null, "正文未变时边不应 stale");
+  const secondHash = withEdge.edges[0].evidence[1].sourceHash;
+
+  // 只改第二章：第一份证据仍有效，第二份失效（原缺陷只取第一份 → reason=null）。
+  const changed = [
+    chapter("chF7a", 1, "交接", text1),
+    chapter("chF7b", 2, "门外", "门外下着雪，刮着风。"),
+  ];
+  const project = { chapters: changed, storyEvents: withEdge };
+  const impact = impactOf(withEdge, project);
+  const staleEdge = impact.storyEvents.edges[0];
+  assert.ok(staleEdge.stale, "第二份证据失效时边必须标 stale");
+  assert.equal(
+    staleEdge.stale.reason,
+    "quote-missing",
+    "reason 必须取自实际失效的第二份证据，而不是第一份或 null",
+  );
+  assert.equal(
+    staleEdge.stale.expectedHash,
+    secondHash,
+    "expectedHash 必须是失效那份证据的原哈希",
+  );
+  assert.ok(
+    storyEventsSchema.safeParse(impact.storyEvents).success,
+    "多证据失效的结果必须能通过 schema（旧实现 reason=null 被拒）",
+  );
+
+  // 采纳（空补丁）必须可保存，且旧节点与旧边继续保留。
+  const applied = applyStoryEventPatch(project, { nodes: [], edges: [] });
+  assert.ok(
+    storyEventsSchema.safeParse(applied).success,
+    "多证据关系变更必须可保存",
+  );
+  assert.equal(applied.edges.length, 1, "旧边不得被删除");
+  assert.equal(applied.edges[0].evidence.length, 2, "旧边证据不得被删除");
+  assert.equal(
+    applied.edges[0].stale?.reason,
+    "quote-missing",
+    "保存后失效原因仍须可解释",
+  );
+  // 按 id 断言旧节点仍在，而不是数总数：
+  // 合并实现可能为校验附挂历史节点副本，总数会随该语义变化，
+  // 但"两个旧节点都还在"这一点必须恒成立。
+  assert.deepEqual(
+    applied.nodes.map((n) => n.id).sort(),
+    [handover.id, opening.id].sort(),
+    "旧节点不得被删除",
+  );
+});
+
+test("F2 候选 issues 必须随采纳落地，且不得清除作者已处理状态", async () => {
+  const { applyStoryEventPatch } = await import(
+    "../runtime/story-events-apply.mjs"
+  );
+  const text = "甲把钥匙交给乙。乙随后打开门。";
+  const chapters = [chapter("chF2", 1, "交接", text)];
+  const built = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      {
+        chapterId: "chF2",
+        title: "甲把钥匙交给乙",
+        summary: "",
+        kind: "handover",
+        actors: ["甲", "乙"],
+        objects: ["钥匙"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(text, "甲把钥匙交给乙。"),
+      },
+    ],
+    { chapters },
+  ).storyEvents;
+  // 正式图已有一条作者处理过的 issue（disposition=kept）。
+  const formal = {
+    chapters,
+    storyEvents: {
+      ...built,
+      issues: [
+        {
+          id: "sit-formal-kept",
+          kind: "conflict",
+          nodeIds: [built.nodes[0].id],
+          edgeIds: [],
+          explanation: "正式图里作者已决定保留的问题",
+          suggestion: "保留，暂不修订",
+          disposition: "kept",
+        },
+      ],
+    },
+  };
+
+  const applied = applyStoryEventPatch(formal, {
+    nodes: [
+      {
+        chapterId: "chF2",
+        title: "乙随后打开门",
+        summary: "",
+        kind: "action",
+        actors: ["乙"],
+        objects: ["门"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(text, "乙随后打开门。"),
+      },
+    ],
+    edges: [],
+    issues: [
+      {
+        id: "sit-candidate-open",
+        kind: "unsourced-knowledge",
+        nodeIds: [],
+        edgeIds: [],
+        explanation: "候选本轮发现的问题",
+        suggestion: "请作者核对获知过程",
+        disposition: "open",
+      },
+    ],
+  });
+
+  assert.ok(
+    applied.issues.some((i) => i.id === "sit-formal-kept"),
+    "正式图已有 issue 不得因采纳而消失",
+  );
+  assert.equal(
+    applied.issues.find((i) => i.id === "sit-formal-kept").disposition,
+    "kept",
+    "作者已处理的决定不得被清除",
+  );
+  assert.ok(
+    applied.issues.some((i) => i.id === "sit-candidate-open"),
+    "候选本轮 issues 必须随采纳落地（原缺陷只合并 nodes/edges/coverage）",
+  );
+  assert.equal(
+    applied.issues.find((i) => i.id === "sit-candidate-open").disposition,
+    "open",
+    "候选问题保留其原始处理状态",
+  );
+});
+
+// ===== 合并收尾校验必须感知 knownNodeIds（跨章边）=====
+
+test("mergeStoryEvents 带 knownNodeIds 时指向外部节点的边通过收尾校验，不带时被拒绝", () => {
+  const ch1 = { id: "ch-k1", number: 1, title: "顺流", summary: "", content: "甲把钥匙交给乙。" };
+  const ch2 = { id: "ch-k2", number: 2, title: "开门", summary: "", content: "乙用钥匙打开门。" };
+  const span = (chapter, quote) => {
+    const start = chapter.content.indexOf(quote);
+    return { start, end: start + quote.length, quote };
+  };
+  const formal = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      {
+        chapterId: "ch-k1",
+        title: "甲把钥匙交给乙",
+        summary: "",
+        kind: "handover",
+        actors: ["甲", "乙"],
+        objects: ["钥匙"],
+        status: "confirmed",
+        basis: "narration",
+        storyTime: "",
+        evidence: span(ch1, "甲把钥匙交给乙"),
+      },
+    ],
+    { chapters: [ch1, ch2] },
+  ).storyEvents;
+  const historyId = formal.nodes[0].id;
+
+  const localDraft = {
+    chapterId: "ch-k2",
+    title: "乙用钥匙打开门",
+    summary: "",
+    kind: "action",
+    actors: ["乙"],
+    objects: ["钥匙"],
+    status: "confirmed",
+    basis: "narration",
+    storyTime: "",
+    evidence: span(ch2, "乙用钥匙打开门"),
+  };
+  const crossEdge = {
+    source: historyId,
+    target: storyEventId({
+      chapterId: "ch-k2",
+      title: "乙用钥匙打开门",
+      start: 0,
+      end: 7,
+    }),
+    type: "recall",
+    basis: "explicit",
+    explanation: "第二章用到第一章交出的钥匙",
+    evidence: [{ chapterId: "ch-k2", ...span(ch2, "乙用钥匙打开门") }],
+  };
+
+  // 带 knownNodeIds：跨章边应通过合并收尾的 schema 校验。
+  const withKnown = mergeStoryEvents(emptyStoryEvents(), [localDraft], {
+    chapters: [ch1, ch2],
+    edges: [crossEdge],
+    knownNodeIds: [historyId],
+    attachNodes: formal.nodes,
+  });
+  // 方案 B：附挂只服务校验，不进入输出——预览/采纳只见本轮节点。
+  assert.equal(
+    withKnown.storyEvents.nodes.length,
+    1,
+    "附挂的正式节点不得进入合并结果",
+  );
+  assert.equal(
+    withKnown.storyEvents.nodes[0].chapterId,
+    "ch-k2",
+    "输出节点必须是本轮章节的节点",
+  );
+  assert.equal(
+    withKnown.storyEvents.edges.length,
+    1,
+    "带 knownNodeIds 时指向正式历史的跨章边必须保留",
+  );
+  assert.equal(withKnown.storyEvents.edges[0].source, historyId);
+  // 附带语义：added 只统计本轮真正新增的节点与边（既有语义），
+  // 附挂的正式节点既不计入 added，也不会出现在输出里。
+  // 本轮产生 1 个新节点 + 1 条新边 = 2。
+  assert.equal(
+    withKnown.counts.added,
+    2,
+    "added 应只含本轮 1 个新节点与 1 条新边，不含附挂节点",
+  );
+  // 原 formal 图对象不得被改写。
+  assert.deepEqual(
+    formal.nodes.map((n) => n.id),
+    [historyId],
+    "附挂不得修改原正式图节点集合",
+  );
+  assert.equal(
+    formal.nodes.some((n) => n.external === true),
+    false,
+    "原正式图不得被打上 external 标记",
+  );
+
+  // 不带 knownNodeIds：同一输入必须被拒绝（边被丢弃并留下 missing-source），
+  // 不能放过真正悬空的边，也不能静默吞掉而不记录。
+  let rejected = false;
+  try {
+    const withoutKnown = mergeStoryEvents(emptyStoryEvents(), [localDraft], {
+      chapters: [ch1, ch2],
+      edges: [crossEdge],
+    });
+    assert.equal(
+      withoutKnown.storyEvents.edges.length,
+      0,
+      "缺少 knownNodeIds 时不得保留指向外部节点的边",
+    );
+    assert.ok(
+      withoutKnown.storyEvents.issues.some((i) => i.kind === "missing-source"),
+      "被拒绝的跨章边必须留下 missing-source 记录，不能静默丢弃",
+    );
+    rejected = true;
+  } catch (error) {
+    rejected = true;
+    assert.match(String(error.message), /两个存在的事件|关系|不存在/);
+  }
+  assert.ok(rejected, "缺少 knownNodeIds 时必须明确拒绝，而不是静默放行");
+});

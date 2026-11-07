@@ -501,6 +501,10 @@ export interface StoryRevisionRequest {
 export interface Bridge {
   storyBuild: (
     id: string,
+    options: { chapters?: string[]; mode: "build" | "complete" },
+  ) => Promise<StoryBuildProgress>;
+  storyBuildStatus: (
+    id: string,
     options?: { chapters?: string[]; mode?: "build" | "complete" },
   ) => Promise<StoryBuildProgress>;
   decideStoryIssue: (

@@ -1274,3 +1274,179 @@ test("R2 契约：normalizeStoryEvents 带 knownNodeIds 时保留跨章边", asy
   assert.equal(withKnown.edges[0].source, historyId);
   assert.equal(withKnown.edges[0].target, localId);
 });
+
+// ===== F3：区间与模型引文不符必须拒绝，不得按区间重截 =====
+
+test("F3 区间与模型引文不符时拒绝并报因，不把另一段文字当证据", async () => {
+  const p = withContent();
+  const content = "汽笛响了。甲把钥匙交给乙。";
+  const ch20 = { id: "ch20", number: 20, title: "钥匙", summary: "", content };
+  const project20 = { ...p, chapters: [...p.chapters, ch20] };
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "转交钥匙",
+          summary: "甲把钥匙交给乙",
+          kind: "handover",
+          actors: ["甲", "乙"],
+          objects: ["钥匙"],
+          basis: "narration",
+          // 故意错位：区间指向「汽笛响了。」，引文却是下一句
+          start: 0,
+          end: 5,
+          quote: "甲把钥匙交给乙。",
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project20, ask, {
+    chapterIds: ["ch20"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 0, "区间与引文不符的事件不得进入候选");
+  assert.ok(
+    result.failures.some((f) => f.includes("quote") || f.includes("引文")),
+    "必须报告引文不匹配的原因，实际：" + JSON.stringify(result.failures),
+  );
+  // 不得把「汽笛响了。」当成该事件的证据
+  assert.equal(
+    result.storyEvents.nodes.some(
+      (n) => n.evidence.quote === "汽笛响了。",
+    ),
+    false,
+    "不得按区间重截另一段文字冒充证据",
+  );
+});
+
+test("F3 正确引用的区间仍能进入候选", async () => {
+  const p = withContent();
+  const content = "汽笛响了。甲把钥匙交给乙。";
+  const ch21 = { id: "ch21", number: 21, title: "钥匙2", summary: "", content };
+  const project21 = { ...p, chapters: [...p.chapters, ch21] };
+  const start = content.indexOf("甲把钥匙交给乙。");
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "转交钥匙",
+          summary: "",
+          kind: "handover",
+          actors: ["甲", "乙"],
+          objects: ["钥匙"],
+          basis: "narration",
+          start,
+          end: start + "甲把钥匙交给乙。".length,
+          quote: "甲把钥匙交给乙。",
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project21, ask, {
+    chapterIds: ["ch21"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 1);
+  assert.equal(result.storyEvents.nodes[0].evidence.quote, "甲把钥匙交给乙。");
+  assert.equal(result.storyEvents.nodes[0].evidence.start, start);
+});
+
+// ===== F4：三个编号必须分开 =====
+
+test("F4 两个事件引用同一原文 sourceId 时关系仍能正确解析", async () => {
+  const p = withContent();
+  const content = "甲把钥匙交给乙。乙打开门。";
+  const ch22 = { id: "ch22", number: 22, title: "交钥匙", summary: "", content };
+  const project22 = { ...p, chapters: [...p.chapters, ch22] };
+  const s2 = content.indexOf("乙打开门。");
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "甲把钥匙交给乙",
+          summary: "",
+          kind: "handover",
+          actors: ["甲", "乙"],
+          objects: ["钥匙"],
+          basis: "narration",
+          sourceId: 1,
+          start: 0,
+          end: "甲把钥匙交给乙".length,
+          quote: "甲把钥匙交给乙",
+        },
+        {
+          title: "乙打开门",
+          summary: "",
+          kind: "action",
+          actors: ["乙"],
+          objects: ["门"],
+          basis: "narration",
+          sourceId: 1,
+          start: s2,
+          end: s2 + "乙打开门。".length,
+          quote: "乙打开门。",
+        },
+      ],
+      relations: [
+        {
+          sourceId: 1,
+          targetId: 2,
+          type: "causal",
+          basis: "explicit",
+          explanation: "拿到钥匙后才能开门",
+          evidenceSourceId: 1,
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project22, ask, {
+    chapterIds: ["ch22"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 2, "两个事件都必须保留");
+  assert.equal(
+    result.storyEvents.edges.length,
+    1,
+    "关系必须解析成功，实际 failures=" + JSON.stringify(result.failures),
+  );
+  assert.equal(result.storyEvents.edges[0].type, "causal");
+});
+
+// ===== F11：数量只写在逐字证据里也不误报 =====
+
+test("F11 数量只写在原文证据里、标题无数字时正常变化不误报", () => {
+  const p = withContent();
+  const content = "桌上有十个苹果。他吃了一个，剩下九个。";
+  const ch23 = { id: "ch23", number: 23, title: "存货", summary: "", content };
+  const project23 = { ...p, chapters: [...p.chapters, ch23] };
+  const a = content.indexOf("桌上有十个苹果");
+  const b = content.indexOf("剩下九个");
+  const built = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      draftNode(ch23, {
+        title: "清点存货",
+        summary: "桌上有一批苹果",
+        start: a,
+        end: a + "桌上有十个苹果".length,
+        quote: "桌上有十个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+      }),
+      draftNode(ch23, {
+        title: "取食后存量减少",
+        summary: "吃过之后剩下的不多",
+        start: b,
+        end: b + "剩下九个".length,
+        quote: "剩下九个",
+        objects: ["苹果"],
+        kind: "state-change",
+      }),
+    ],
+    { chapters: project23.chapters },
+  ).storyEvents;
+  assert.equal(built.nodes.length, 2, "前置：两个节点都应建立");
+  const checked = checkStoryEvents(project23, built);
+  assert.equal(
+    checked.issues.filter((i) => i.kind === "state-break").length,
+    0,
+    "数量只写在逐字证据里的正常变化不得误报",
+  );
+});

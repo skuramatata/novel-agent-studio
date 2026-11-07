@@ -223,16 +223,42 @@ export async function extractStoryEvents(
               : null;
           if (!ref && !Number.isInteger(event.start))
             failures.push(`第${chapter.number}章第${index + 1}片 events[${i}] 未给出可定位的 sourceId 或区间`);
-          const span =
-            Number.isInteger(event.start) && Number.isInteger(event.end)
-              ? { start: part.start + event.start, end: part.start + event.end }
-              : null;
-          const located =
-            span ?? locate(part.text, event.quote || ref?.text || "", part.start);
-          if ((!ref && !span) || !located) {
-            failures.push(`第${chapter.number}章第${index + 1}片 events[${i}].quote 不在原文中`);
+          // F3：区间只用来"核验"模型引文，不用来重新截取。
+          // 区间与逐字引文不一致时必须拒绝并报因，不能按区间换一段文字当证据。
+          const hasSpan =
+            Number.isInteger(event.start) && Number.isInteger(event.end);
+          const span = hasSpan
+            ? { start: part.start + event.start, end: part.start + event.end }
+            : null;
+          const located = locate(
+            part.text,
+            event.quote || ref?.text || "",
+            part.start,
+          );
+          if (!located) {
+            failures.push(
+              `第${chapter.number}章第${index + 1}片 events[${i}].quote 不在原文中`,
+            );
             continue;
           }
+          if (hasSpan) {
+            const slice = chapter.content.slice(span.start, span.end);
+            if (slice !== event.quote) {
+              failures.push(
+                `第${chapter.number}章第${index + 1}片 events[${i}] 区间与引文不符：` +
+                  `start=${event.start}/end=${event.end} 处原文是「${slice}」，` +
+                  `模型 quote 是「${event.quote}」；引用必须逐字对应，已拒绝该事件。`,
+              );
+              continue;
+            }
+          }
+          if (!ref && !hasSpan && !located) {
+            failures.push(
+              `第${chapter.number}章第${index + 1}片 events[${i}] 未给出可定位的 sourceId 或区间`,
+            );
+            continue;
+          }
+          // 证据区间取模型引文在原文中的真实位置，引文本身保持模型原样。
           const evidence = eventEvidence(
             chapter.id,
             chapter.content,
@@ -250,12 +276,12 @@ export async function extractStoryEvents(
             storyTime: event.storyTime ?? "",
             evidence,
           });
-          // 临时序号按模型给出的 sourceId 记录；未给时用输出顺序号兜底，
-          // 保证 relations 里常见的 1..n 序号始终能解析到本片事件。
-          localIds.set(
-            Number.isInteger(event.sourceId) ? event.sourceId : nodeDrafts.length,
-            nodeDrafts.length - 1,
-          );
+          // F4：事件临时编号与原文片段 sourceId 是两套编号，必须分开。
+          // ① event.sourceId 只指向本片 sources[]（上面已用于定位原文）；
+          // ② 事件临时编号恒为本片输出顺序 1..n，供 relations 的 sourceId/targetId 引用；
+          // ③ 持久化 ID 由 mergeStoryEvents 用 storyEventId 生成。
+          // 若把 ① 当 ② 用，两个事件引用同一 sourceId 时后者会覆盖前者，关系端点丢失。
+          localIds.set(nodeDrafts.length, nodeDrafts.length - 1);
         }
         const merged = mergeStoryEvents(graph, nodeDrafts, {
           chapters: p.chapters,
@@ -472,8 +498,12 @@ export function checkStoryEvents(project, graph, { knowledgeClaims = [] } = {}) 
   // 并且能读出"从旧量到新量"的两个数量。满足才算有承接解释。
   const PROCESS =
     /(吃|喝|用|消耗|分|送|交|取|拿走|丢掉|扔|剥|卖出|买入|添加|添|增|减|剩|余|留|变为|变成|降|升)/;
+  // F11：数量可能只写在逐字证据里（模型不该被迫把数字重复进标题），
+  // 因此判断"新旧量"时必须读证据，与 numbersOf 的读取范围保持一致。
   const countText = (node) =>
-    [...`${node.title}${node.summary}`.matchAll(QUANTITY)].map((m) => m[0]).join(",");
+    [...`${node.title}${node.summary}${node.evidence.quote}`.matchAll(QUANTITY)]
+      .map((m) => m[0])
+      .join(",");
   // 叙述先后以本章正文的实际位置为准（narrativeOffset 在草稿里常为 0，
   // 不能作为排序依据）；同起点时用 narrativeOffset 兜底。
   const precedes = (before, after) => {

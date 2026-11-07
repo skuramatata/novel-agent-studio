@@ -158,6 +158,37 @@ const preview: Bridge = {
       touchesManuscript: false as const,
     };
   },
+  // F1 只读降级：浏览器预览没有建图能力，返回与桌面同构的进度结构，不触发模型。
+  storyBuildStatus: async (id, options) => {
+    const p = load(id);
+    const mode =
+      options?.mode === "complete" ? ("complete" as const) : ("build" as const);
+    const chapters = p.chapters.map((c) => ({
+      chapterId: c.id,
+      chapterNumber: c.number,
+      chapterTitle: c.title,
+      status: "pending" as const,
+      parts: [],
+      eventCount: 0,
+      failure: null,
+    }));
+    return {
+      enabled: false,
+      state: "unsupported" as const,
+      mode,
+      hasContent: p.chapters.some((c) => Boolean(c.content.trim())),
+      chapters,
+      counts: {
+        total: chapters.length,
+        extracted: 0,
+        partial: 0,
+        failed: 0,
+        pending: chapters.length,
+      },
+      failure: "浏览器预览不支持建立事件图，请在桌面应用中操作。",
+      touchesManuscript: false as const,
+    };
+  },
   // R9 预览降级：写操作必须失败得明确，不能假装已保存。
   decideStoryIssue: async () => {
     throw Error("处理问题决定需要写入作品，请在桌面应用中操作。");

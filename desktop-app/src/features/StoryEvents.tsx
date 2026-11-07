@@ -578,19 +578,28 @@ function IssueList({
   candidateIssues,
   nodesById,
   onSelectNode,
-  onDecide,
-  deciding,
-  decisionError,
+  authorActions,
 }: {
   issues: StoryIssue[];
   candidateIssues: StoryCandidateIssue[];
   nodesById: Map<string, StoryEventNode>;
   onSelectNode: (id: string) => void;
-  onDecide: (issueId: string, decision: StoryIssueDecision) => Promise<boolean>;
-  deciding: boolean;
-  decisionError: string;
+  authorActions: {
+    onDecide: (issueId: string, decision: StoryIssueDecision) => Promise<boolean>;
+    onRevision: (
+      issue: StoryIssue,
+      node: StoryEventNode | null,
+      instruction: string,
+    ) => Promise<boolean>;
+    deciding: boolean;
+    error: string;
+  };
 }) {
+  const { onDecide, onRevision, deciding, error: decisionError } = authorActions;
   const [kind, setKind] = useState("");
+  // F10：按 issueId 记录作者填写的修订要求，避免所有问题共用一个输入框。
+  const [revisionInput, setRevisionInput] = useState<Record<string, string>>({});
+  const [revisionTarget, setRevisionTarget] = useState<string | null>(null);
   const [scope, setScope] = useState<"formal" | "candidates">("formal");
   const source = scope === "formal" ? issues : candidateIssues;
   const visible = kind ? source.filter((i) => i.kind === kind) : source;
@@ -624,8 +633,8 @@ function IssueList({
         </button>
       </div>
       {decisionError && (
-        <p className="sev-warn-text" role="alert">
-          处理决定未保存：{decisionError}
+        <p className="sev-warn-text" role="alert" data-testid="sev-author-error">
+          {decisionError}
         </p>
       )}
       <label className="sev-field">
@@ -697,7 +706,73 @@ function IssueList({
                         {action.label}
                       </button>
                     ))}
+                    <button
+                      className="sev-decision-btn sev-revision-trigger"
+                      title="按此问题发起正文修订；会先进入既有草稿候选流程，采纳后才写入正文"
+                      onClick={() =>
+                        setRevisionTarget((current) =>
+                          current === issue.id ? null : issue.id,
+                        )
+                      }
+                    >
+                      发起修订
+                    </button>
                   </div>
+                  {revisionTarget === issue.id && (
+                    <div className="sev-revision-box">
+                      <label>
+                        <span>修订要求（会写入候选，不直接改正文）</span>
+                        <textarea
+                          rows={3}
+                          aria-label="修订要求"
+                          value={revisionInput[issue.id] || ""}
+                          onChange={(e) =>
+                            setRevisionInput((current) => ({
+                              ...current,
+                              [issue.id]: e.target.value,
+                            }))
+                          }
+                          placeholder="例如：补写林遥如何得知钥匙在父亲手里，别改其他段落。"
+                        />
+                      </label>
+                      <div className="sev-revision-actions">
+                        <button
+                          className="primary sev-decision-btn"
+                          disabled={
+                            deciding || !(revisionInput[issue.id] || "").trim()
+                          }
+                          onClick={async () => {
+                            const target = issue.nodeIds
+                              .map((id) => nodesById.get(id))
+                              .find(Boolean) || null;
+                            const ok = await onRevision(
+                              issue,
+                              target,
+                              revisionInput[issue.id] || "",
+                            );
+                            if (ok) {
+                              setRevisionTarget(null);
+                              setRevisionInput((current) => ({
+                                ...current,
+                                [issue.id]: "",
+                              }));
+                            }
+                          }}
+                        >
+                          生成修订候选
+                        </button>
+                        <button
+                          className="sev-decision-btn"
+                          onClick={() => setRevisionTarget(null)}
+                        >
+                          取消
+                        </button>
+                      </div>
+                      <p className="small muted">
+                        修订请求会进入既有草稿流程，生成的是候选；作者采纳后才改变正文。
+                      </p>
+                    </div>
+                  )}
                 </div>
               ) : scope === "formal" ? (
                 <p className="small muted">已由作者处理，不再提示。</p>
@@ -741,6 +816,7 @@ export function StoryEvents() {
     deciding,
     decisionError,
     decideIssue,
+    requestRevision,
   } = useStoryEvents();
   const fitGraph = useRef<(() => void) | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -1297,9 +1373,12 @@ export function StoryEvents() {
                 setSelectedNode(id);
                 setTab("inspector");
               }}
-              onDecide={decideIssue}
-              deciding={deciding}
-              decisionError={decisionError}
+              authorActions={{
+                onDecide: decideIssue,
+                onRevision: requestRevision,
+                deciding,
+                error: decisionError,
+              }}
             />
           ) : (
             <>

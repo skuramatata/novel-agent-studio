@@ -80,9 +80,14 @@ export function normalizeEvidence(raw, chapters, fallbackChapterId) {
   // 区间与逐字引文必须完全一致：不接受"引文存在但区间指向别处"，
   // 否则会把同章另一段文字当成事件出处，并用当前哈希盖成有效证据。
   if (slice !== quote) return null;
+  // 旧证据读取/合并时必须保留它建立时的哈希：
+  // 用当前正文重算会悄悄"重新盖章"，让改稿后的失效消失（失效数变 0）。
+  // 只有模型新草稿（无 sourceHash）才按当前正文建立哈希。
+  const established =
+    typeof raw.sourceHash === "string" && raw.sourceHash ? raw.sourceHash : null;
   return {
     chapterId,
-    sourceHash: digest(source.content),
+    sourceHash: established ?? digest(source.content),
     start,
     end,
     quote,
@@ -170,12 +175,23 @@ function matchScore(node, draft) {
 // 才可能是同一事件的改写；否则一律按另一件事新建节点，保留各自身份与连线。
 function sameEvent(node, draft, score) {
   if (score < 2) return false;
+  // 标题高度相似（完全一致或互相包含）才是同一事件的强证据。
+  // 仅"有共词"不足以判同一：同一句里"甲把钥匙交给乙"和"乙把钥匙交给丙"
+  // 共词很多，却是两次不同交接，必须保留各自身份。
   const titleScore = textScore(node.title, draft.title);
-  if (titleScore > 0) return true;
+  if (titleScore >= 2) return true;
+  // 共享实体只是"可能相关"。要判同一事件，必须在动作语义上也一致：
+  // kind 相同、对象集合相同、参与者也相同。
+  // 注意：不能因为"分数高"就放行——同句两次交接的分数同样很高。
   if (node.kind !== draft.kind) return false;
-  const sharedActors = draft.actors.some((a) => node.actors.includes(a));
-  const sharedObjects = draft.objects.some((o) => node.objects.includes(o));
-  return sharedActors || sharedObjects;
+  const nodeObjects = [...node.objects].sort().join("|");
+  const draftObjects = [...draft.objects].sort().join("|");
+  const sameObjects = nodeObjects === draftObjects;
+  const nodeActors = [...node.actors].sort().join("|");
+  const draftActors = [...draft.actors].sort().join("|");
+  const sameActors = nodeActors === draftActors;
+  // 实体完全一致（同 actor 集合且同 object 集合）且引文逐字相同，才视为重抽同一条。
+  return sameObjects && sameActors && node.evidence.quote === draft.evidence.quote;
 }
 
 function detectCoverageStatus(value) {
@@ -476,7 +492,16 @@ function issueFor(kind, explanation, { nodeIds = [], edgeIds = [], suggestion = 
 // 已有图必须带着章节表归一化，否则合法 explicit 边会因为"无正文可核"被丢弃。
 export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
   const chapters = options.chapters || (options.chapter ? [options.chapter] : []);
-  const current = normalizeStoryEvents({ ...graph, chapters });
+  // 候选增量可引用正式历史端点：调用方声明已知节点后，本轮 edges 的端点
+  // 允许指向它；未被声明的端点仍按缺失处理。
+  const knownNodeIds =
+    options.knownNodeIds instanceof Set
+      ? options.knownNodeIds
+      : new Set(options.knownNodeIds || []);
+  const current = normalizeStoryEvents(
+    { ...graph, chapters },
+    { knownNodeIds },
+  );
   const chapterById = chapterMap(chapters);
   const nodes = current.nodes.map((n) => ({ ...n }));
   const issues = [...current.issues];
@@ -562,6 +587,7 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
       },
       nodes,
       chapters,
+      knownNodeIds,
     );
     if (!checked.ok) {
       issues.push(
@@ -588,15 +614,50 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
     if (index >= 0) coverage[index] = entry;
     else coverage.push(entry);
   }
-  // 合并阶段不能再跑一遍全量归一化：那会把本轮没提到、但当时判定为
-  // "无正文可核"的合法边删掉。只校验图自身的一致性（id 唯一、端点存在）。
+  // 关系端点可以指向本次增量之外的已存在事件（knownNodeIds / attachNodes）。
+  // 输出图必须自洽（关系两端都在 nodes 里），但附挂/占位都只服务校验：
+  // - attachNodes 提供真实副本，仅用于撑起收尾校验，不进入输出、不计入 added；
+  // - 只声明 knownNodeIds 而无副本时，用最小占位同样只服务校验。
+  // 需要展示跨章边的调用方（如候选预览）自行把被引用的正式节点补进视图。
+  const attach = new Map(
+    (options.attachNodes || []).filter(Boolean).map((n) => [n.id, n]),
+  );
+  const knownEndpointIds =
+    options.knownNodeIds instanceof Set
+      ? new Set(options.knownNodeIds)
+      : new Set(options.knownNodeIds || []);
+  const present = new Set(nodes.map((n) => n.id));
+  const externalEndpoints = new Set();
+  for (const edge of edges) {
+    for (const id of [edge.source, edge.target]) {
+      if (present.has(id)) continue;
+      if (attach.has(id) || knownEndpointIds.has(id)) externalEndpoints.add(id);
+      else
+        throw Error(
+          `关系指向不存在的事件：${id}；既不在本次节点中，也未通过 knownNodeIds 声明为已存在。`,
+        );
+    }
+  }
+  // 收尾校验用节点：真实节点 + 外部端点占位（真实副本优先，否则借用形状）。
+  const schemaNodes = [...nodes];
+  for (const id of externalEndpoints) {
+    const source = attach.get(id) ?? nodes[0];
+    schemaNodes.push({ ...source, id, evidence: { ...source.evidence } });
+  }
   let storyEvents = storyEventsSchema.parse({
     version: 1,
-    nodes,
+    nodes: schemaNodes,
     edges,
     coverage,
     issues: dedupeIssues(issues),
   });
+  if (externalEndpoints.size) {
+    // 占位/附挂都不属于本次合并输出；边保留并继续指向正式事件 id。
+    storyEvents = {
+      ...storyEvents,
+      nodes: storyEvents.nodes.filter((n) => !externalEndpoints.has(n.id)),
+    };
+  }
   if (chapters.length) {
     // 失效是派生状态：按当前正文复算，标记与报告，不删除节点或边。
     const impact = impactOf(storyEvents, { chapters });
@@ -644,15 +705,20 @@ export function impactOf(graph, project) {
   }
   const staleSet = new Set(staleNodeIds);
   for (const edge of edges) {
-    const covered =
-      edge.evidence.length > 0
-        ? edge.evidence.every((e) => check(e) === null)
-        : true;
-    if (!covered || staleSet.has(edge.source) || staleSet.has(edge.target)) {
+    // 逐份检查：多证据关系里，失效的未必是第一份。
+    // 只取 evidence[0] 会在"首份有效、后份失效"时得到 null 原因，
+    // 导致 schema 拒绝、候选无法保存。
+    const failedEvidence = edge.evidence.find((e) => check(e) !== null) || null;
+    const evidenceStale = failedEvidence !== null;
+    if (evidenceStale || staleSet.has(edge.source) || staleSet.has(edge.target)) {
       edge.stale = {
         at: now(),
-        reason: covered ? "source-changed" : check(edge.evidence[0]),
-        expectedHash: edge.evidence[0]?.sourceHash ?? "",
+        // 证据失效时必须用真正失效那一份的原因与原哈希；
+        // 仅端点失效（证据本身仍有效）时沿用首份证据的哈希，原因记来源变化。
+        reason: evidenceStale ? check(failedEvidence) : "source-changed",
+        expectedHash: evidenceStale
+          ? failedEvidence.sourceHash ?? ""
+          : edge.evidence[0]?.sourceHash ?? "",
       };
       staleEdgeIds.push(edge.id);
     }

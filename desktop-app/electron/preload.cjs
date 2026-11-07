@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("studio", {
     ipcRenderer.invoke("studio:decide-story-issue", request),
   storyBuild: (id, options) =>
     ipcRenderer.invoke("studio:story-build", id, options),
+  storyBuildStatus: (id, options) =>
+    ipcRenderer.invoke("studio:story-build-status", id, options),
   task: (id) => ipcRenderer.invoke("studio:task", id),
   logs: (id, options) => ipcRenderer.invoke("studio:logs", id, options),
   logNode: (id, taskId, nodeId) =>

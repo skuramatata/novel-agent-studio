@@ -64,3 +64,55 @@
 ## 环境操作说明
 
 开始安装依赖时一次命令误在上级无 package.json 目录执行，npm 向上找到用户目录的已有项目并开始安装；已中止。用户目录的 package.json 与 package-lock.json 时间戳未变化，但 node_modules 可能受到该次安装影响，因缺少原始快照没有盲目删除或回滚。此后所有安装均限定在 desktop-app。
+
+## 故事事件链第一阶段第二轮返修（2026-11-07）
+
+### 需求来源
+
+`agent-design/story-event-chain-review-fix-stage-1-round2.md` 列出 F1–F11 十一项经独立 review 确认的缺陷。上一轮 R1–R10 虽已交付并通过 376 项测试与旧桌面脚本，但那些结果没有覆盖本轮缺陷：建图入口在真实桌面不可用、候选问题在采纳时丢失、抽取按区间重截原文、原文 sourceId 被当作事件编号、同句两事件被合并、旧证据哈希被重新盖章、多证据失效原因取错、预览丢跨章边、作者决定后 revision 不同步、问题面板无修订入口、数量解释只读标题。
+
+### 本轮修改文件
+
+运行时：`runtime/story-events.mjs`、`runtime/story-events-apply.mjs`、`runtime/story-event-agent.mjs`。
+主进程新增：`electron/story-build-channel.mjs`（建图通道与只读状态、预览合并）、`electron/model-transport.mjs`（模型传输接缝与 E2E 替身入口）。
+主进程修改：`electron/main.mjs`、`electron/preload.cjs`。
+前端：`src/features/StoryEvents.tsx`、`src/features/useStoryEvents.ts`、`src/lib/bridge.ts`、`src/lib/types.ts`。
+测试：`tests/story-build-channel.test.mjs`（新增）、`tests/model-transport.test.mjs`（新增）、`tests/story-events.test.mjs`、`tests/story-event-workflow.test.mjs`。
+验收脚本：`scripts/verify-story-events.cjs`、`.fixtures.cjs`、`.assert.cjs`、`.model-stub.mjs`（新增替身）。
+
+### 实现要点
+
+- **F1**：`studio:story-build-status` 是纯只读投影（我核对 handler 体内 `save`/`extractStoryEvents`/`complete` 计数为 0）；`studio:story-build` 由主进程按当前 provider 配置自建 ask，未配置时报可读错误而非"需要注入 ask"。执行入口要求显式 `mode`，防止误触发模型。
+- **F2**：`mergeIssues()` 让候选 issues 随采纳落地；同 id 且既有 `disposition !== "open"` 时保留作者决定。
+- **F3/F4**：区间只用于核验模型引文，不符即拒绝并报因；原文 sourceId、事件临时编号（本片 1..n）、持久化 id 三套彻底分开。
+- **F5**：`sameEvent` 改为"标题强相似 或 kind + 对象集合 + 参与者集合 + 引文逐字全同"，不再按分数放行。
+- **F6/F7**：旧证据带 `sourceHash` 时保留原哈希，只有模型新草稿才建新哈希；边失效原因与 `expectedHash` 取自实际失效的那份证据。
+- **F8**：预览传 `knownNodeIds` + `attachNodes`，跨章边可见；附挂副本只在校验期存在，输出剔除，另返回 `referencedFormalNodes` 供界面查对端。
+- **F9**：作者决定后走既有 `StudioContext.refresh` 同步整份作品；未绕过版本校验。
+- **F10**：修订入口调既有 `generate(chapterId, words)`；`generate` 返回 false 时按分支写入 `decisionError`，不再静默无反应；提交前先 `refresh` 避免旧 revision。
+- **F11**：`countText` 与检测范围一致，改为读 `title + summary + evidence.quote`。
+- 模型传输接缝：`resolveModelTransport()` 统一出口，`NOVEL_E2E_MODEL_STUB` 仅在 `app.isPackaged === false` 生效，加载失败抛错不回落真实 fetch。
+
+### 实际验证
+
+- `node --test tests/story-events.test.mjs tests/story-event-workflow.test.mjs` → 75 tests / 75 pass / exit 0
+- `npm test` → 405 tests / 405 pass / 0 fail / exit 0
+- `./node_modules/.bin/tsc --noEmit` → exit 0
+- `git diff --check` → exit 0
+- `node scripts/verify-story-events.cjs` → exit 0，`status: passed`，26 案例 0 失败，`pageErrors: []`，`fixtureEvidenceAudit.ok: true`，`restartVerified: true`，11 张截图
+- 失败信号传导：注入一条必失败断言后 `EXIT=1` 并打印失败案例名；移除后 `grep` 计数为 0
+- `workflow_verify`（auto-workflow 1.0.7）实跑 `npm test` → `passed: true`、`exitCode: 0`
+
+### 两条真实产品链路（脚本内以开发模式 + 模型替身驱动）
+
+链路 1：两章已采纳无图 → 只读状态（fetch 计数前后为 0）→ 真实 `story-build` 未传 ask 建图 → 真实 `generate` 生成空白新章候选 → 请求携带 `sev-` id 与正式图原文 → 预览含跨章边/候选问题 → 放弃候选后重读盘正式图字节一致 → 再生成预览采纳 → 同库重启后节点/边/问题 id 全一致。
+
+链路 2：问题面板查看证据 → 保留/驳回/裁定三次持久化且正文不变 → 保存设定后下一次生成无 revision 冲突 → 显式修订进入既有生成流程 → 未采纳前正文不变 → 采纳后重启检查正文、事件与失效原点。
+
+### 仍未验证
+
+1. 全部模型响应来自注入替身，不证明真实 GLM/MiniMax 理解并使用了事件材料；本阶段未调用真实供应商。
+2. 打包产物下替身被忽略仅有代码层 `isPackaged` 短路证据，链路按设计在开发模式运行。
+3. 正式十章作品未建图（刻意只读保护）。
+4. 「放弃候选」无独立 IPC，走的是 UI 改 status 后 save 的既有路径——这是现状，不是本轮新增设计。
+5. 深色主题与色弱对比度未做正式测量。
