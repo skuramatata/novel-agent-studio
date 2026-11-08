@@ -116,3 +116,51 @@
 3. 正式十章作品未建图（刻意只读保护）。
 4. 「放弃候选」无独立 IPC，走的是 UI 改 status 后 save 的既有路径——这是现状，不是本轮新增设计。
 5. 深色主题与色弱对比度未做正式测量。
+
+## 故事事件链第一阶段第三轮返修（2026-11-08）
+
+### 需求来源
+
+`agent-design/story-event-chain-review-fix-stage-1-round3.md` 列出 G1–G7 七项经独立 review 确认的缺陷。第二轮虽已交付 F1–F11 并通过 412 项测试与 28 个端到端案例，但那些结果没有覆盖本轮缺陷：过滤无效事件后关系编号错移、同句往返交接被合并、重复引文丢弃正确区间、建图后画布与共享 revision 未刷新、「重新建立」空跑、把「剩」当变化过程漏报同时点矛盾、验收脚本允许失败通过。
+
+### 本轮修改文件
+
+运行时：`runtime/story-event-agent.mjs`、`runtime/story-events.mjs`。
+前端：`src/features/StoryEvents.tsx`、`src/features/useStoryEvents.ts`。
+验收脚本：`scripts/verify-story-events.cjs`、`.assert.cjs`、`.model-stub.mjs`。
+测试：`tests/story-event-workflow.test.mjs`、`tests/story-events.test.mjs`。
+
+### 实现要点
+
+- **G1**：事件临时编号改用**模型原始输出序号**（第 i 个即 i），被拒事件显式占位 `null`；关系引用被拒序号时报「对应事件已被拒绝，无法作为端点」，不移接到其他事件。
+- **G2**：`sameEvent` 新增方向判据——`handover`/`state-transfer` 类事件的参与者顺序承载方向，集合相同但顺序不同即为两个事件；另比对标题中的方向词（还给/交还/归还/取回/收回/交回）。同句往返交接因此保留两个身份。
+- **G3**：有区间时直接采用模型已核验的 span，不再被 `indexOf` 首处覆盖；无区间时 `locateUnique` 要求引文在本片唯一，重复出现即报歧义并拒绝，不静默选第一处。区间与引文不符仍拒绝（F3 行为保留）。
+- **G4**：`startBuild` 成功后 `await refresh()`，经既有 `StudioContext` 同步完整作品与 revision，与 F9 的 `decideIssue` 同源，未关闭 revision 校验。
+- **G5**：新增 `primaryBuildMode`/`primaryBuildLabel`/`canRebuild` 三个纯函数，让「建立/补全」的 mode 与文案同源；「重新建立」拆为独立按钮，仅在已有覆盖记录时出现且固定传 `build`。后端 `mode` 语义未改。
+- **G6**：`PROCESS` 拆为动作词与结果态（「剩」不再单独构成过程）；新增 `explicitSameTime`——两条 `storyTime` 相同且非空时禁止用过程动词豁免，同刻并存的两个数量必须进待核对项。检查未关闭。
+- **G7**：删除 `|| result.ok === false` 这类失败即通过的断言；生成成功路径改为「`result.ok === true` 且按候选 ID 证明本次新候选」；`chain1-accept` 用真实 `generatedCandidateId`（为 null 判 fail）；`chain2-accept-restart` 真实执行 accept 后重新读盘再重启。新增可控失败注入入口 `NOVEL_E2E_INJECT_FAILURE`，并修复脚本跑完不退出的问题（`finally` 中 `process.exit`）与 `runner.list()` 浅拷贝导致注入失效。
+
+### 实际验证
+
+- `node --test tests/story-events.test.mjs tests/story-event-workflow.test.mjs tests/story-build-channel.test.mjs` → 96 tests / 96 pass / exit 0
+- `npm test` → 412 tests / 412 pass / 0 fail / exit 0
+- `./node_modules/.bin/tsc --noEmit` → exit 0
+- `git diff --check` → exit 0
+- `node scripts/verify-story-events.cjs` → **exit 0**，`status: passed`，28 案例全通过，`pageErrors: []`，`fixtureEvidenceAudit.ok: true`，`restartVerified: true`，11 张截图
+- **可控失败**：`NOVEL_E2E_INJECT_FAILURE=case-04 node scripts/verify-story-events.cjs` → **EXIT CODE 1**，失败案例含 `case-04(R4)`，报告内 `evidence: { injected: true }`
+- `workflow_verify`（auto-workflow 1.0.7）实跑 `npm test` → `passed: true`、`exitCode: 0`
+
+### 端到端两条链路（隔离库 + 模型替身）
+
+链路 1（建图与跨章候选）：两章已采纳无图 → 只读状态 → 真实按钮建图（不传 ask）→ **同一会话**读盘确认 `diskNodes: 4` 且 `viewNodes: 4`（G4 同步）→ 保存设定成功 → `g5-build-modes` 验证 complete 不重做、build 真重建 → 生成空白新章候选（12 次真实模型请求，记录候选 ID）→ 请求携带 `sev-` id 与正式图原文 → 预览 `edges: 2` 与原文引文（候选区独立）→ 放弃本次候选并重读盘确认未污染 → 再生成并采纳本次新候选 → 同库重启核对节点/边/问题 ID 全一致。
+
+链路 2（作者决定与显式修订）：问题面板查看证据 → 保留/驳回/裁定持久化且正文不变 → F9 决定后 revision 同步、紧接着保存不冲突 → 保存设定及下次生成无 revision 冲突 → 作者输入要求显式发起修订 → 真实生成草稿候选并预览 → 未采纳前正文不变 → 实际采纳 → 重启核对。
+
+### 仍未验证
+
+1. 全部模型响应来自 `NOVEL_E2E_MODEL_STUB` 替身，证明的是"请求携带历史事件 id 与原文"，不证明真实 GLM/MiniMax 理解并使用；本阶段未调用真实供应商。
+2. 打包产物下替身被忽略仅有代码层 `isPackaged` 短路证据，链路按设计在开发模式运行。
+3. 正式十章作品未建图（刻意只读保护）。
+4. 「放弃候选」无独立 IPC，走 UI 改 status 后 save 的既有路径——这是现状，不是本轮新增设计。
+5. G2 的方向判据依赖 `actors` 顺序；真实模型若对 actors 排序不稳定，往返交接可能仍被合并，未做真实模型抽样。
+6. G6 向前扩两句取动作词，若正文分段极碎可能取不到，未做长文本抽样。

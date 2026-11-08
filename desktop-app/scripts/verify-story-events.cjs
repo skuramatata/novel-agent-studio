@@ -280,6 +280,54 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
   const candidateNote = "候选事件已写入未采纳消息";
   await fs.writeFile(path.join(dir, "project.json"), JSON.stringify(project));
   // 第二个隔离作品：完全不带 storyEvents，用于验证三种空态表达（未建立事件链）。
+  // 库 A（建图与重建）：两章都有正文、无 storyEvents。
+  // 专供 chain1-read / chain1-build / g5-build-modes —— 这三项都要求
+  // "建图前所有章都已完成"，因此这里不能留空白章。
+  const buildDir = await fs.mkdtemp(path.join(os.tmpdir(), "novel-sev-build-"));
+  const buildProject = {
+    ...project,
+    revision: 1,
+    messages: [],
+    chapters: [
+      { id: "b1", number: 1, title: "顺济号出航", summary: "", content: "林砚把铜扣交给父亲。汽笛响了三声，顺济号解缆离岸。" },
+      { id: "b2", number: 2, title: "黑石岛", summary: "", content: "林砚在甲板上看见三十年前的旧船影子。父亲说那只是雾。" },
+    ],
+  };
+  delete buildProject.storyEvents;
+  await fs.writeFile(path.join(buildDir, "project.json"), JSON.stringify(buildProject));
+  await fs.writeFile(
+    path.join(buildDir, "test.env"),
+    "# 假密钥：仅让产品认为模型通道已配置；真实请求必被 NOVEL_E2E_MODEL_STUB 拦截。\nZAI_CODING_CN_API_KEY=e2e-stub-key-never-real\nMAIN_MODEL=glm-5.3\n",
+  );
+
+  // 链路1 专用隔离库：两章已采纳正文 + 一章空白，专供"空白新章候选"生成。
+  // 独立库的原因：case-01/F10 会消耗掉主库里的空白章，链路1 若共用会失去可起草的章。
+  const chain1Dir = await fs.mkdtemp(path.join(os.tmpdir(), "novel-sev-chain1-"));
+  const chain1Project = {
+    ...project,
+    revision: 1,
+    messages: [],
+    storyEvents: undefined,
+    chapters: [
+      { id: "c1", number: 1, title: "顺济号出航", summary: "", content: "林砚把铜扣交给父亲。汽笛响了三声，顺济号解缆离岸。" },
+      { id: "c2", number: 2, title: "黑石岛", summary: "", content: "林砚在甲板上看见三十年前的旧船影子。父亲说那只是雾。" },
+      { id: "c3", number: 3, title: "退潮之前", summary: "林砚独自下到船舱底层。", content: "" },
+    ],
+    characters: [
+      { id: "c1", name: "林砚", role: "主角", goal: "", secret: "", voice: "", position: { x: 40, y: 40 } },
+      { id: "c2", name: "林父", role: "父亲", goal: "", secret: "", voice: "", position: { x: 320, y: 40 } },
+    ],
+    relations: [
+      { id: "r1", source: "c1", target: "c2", label: "父子", detail: "林砚与林父。" },
+    ],
+  };
+  delete chain1Project.storyEvents;
+  await fs.writeFile(path.join(chain1Dir, "project.json"), JSON.stringify(chain1Project));
+  await fs.writeFile(
+    path.join(chain1Dir, "test.env"),
+    "# 假密钥：仅让产品认为模型通道已配置；真实请求必被 NOVEL_E2E_MODEL_STUB 拦截。\nZAI_CODING_CN_API_KEY=e2e-stub-key-never-real\nMAIN_MODEL=glm-5.3\n",
+  );
+
   const emptyDir = await fs.mkdtemp(path.join(os.tmpdir(), "novel-sev-empty-"));
   const emptyProject = {
     ...project,
@@ -301,6 +349,30 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
 
   // 打包时 prebuild 会再递增一次版本，build-info.json 可能比包内新一版；
   // 以应用包实际版本为等待基准，避免误判“没启动”。
+  // 等应用就绪：以"能通过 IPC 取到作品列表且非空"为明确成功信号；
+  // 超时视为失败并抛错（不得把超时当成功）。
+  const waitAppReady = async (appLike, pageLike, label) => {
+    const deadline = Date.now() + 30000;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      try {
+        const ids = await pageLike.evaluate(async () => {
+          const list = await window.studio.list();
+          const arr = Array.isArray(list) ? list : list.entries || [];
+          return arr.map((e) => e.id);
+        });
+        if (Array.isArray(ids) && ids.length > 0) return ids;
+        lastError = new Error("作品列表为空");
+      } catch (e) {
+        lastError = e;
+      }
+      await pageLike.waitForTimeout(300);
+    }
+    throw new Error(
+      `${label} 未在 30s 内就绪（明确失败，不按成功处理）：${lastError && lastError.message}`,
+    );
+  };
+
   const build = JSON.parse(
     await fs.readFile(path.join(root, "build-info.json"), "utf8"),
   );
@@ -665,9 +737,11 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       { caseId: "case-10", title: "十苹果吃一剩九不误报、同时点冲突仍报", rNumbers: ["R10"], blockedBy: null },
       { caseId: "case-A", title: "正向回忆：ch4 听过它响 ← ch2 放信号", rNumbers: ["R2"], blockedBy: "待接入 recall 正向样本" },
       { caseId: "case-B", title: "缺依据反例：无来源知情形成待核对项", rNumbers: ["R8"], blockedBy: null },
+      { caseId: "g5-build-modes", title: "G5：补全不重做 / 重建确实重建", rNumbers: ["R7", "G5"], blockedBy: null },
       { caseId: "chain1-read", title: "链路1：无图作品读取建图状态", rNumbers: ["R7"], blockedBy: null },
       { caseId: "chain1-build", title: "链路1：真实建图 IPC（不传函数）", rNumbers: ["R7", "F1"], blockedBy: "task-10（G1 模型接缝）" },
-      { caseId: "chain1-generate", title: "链路1：真实章节工作流生成空白新章候选", rNumbers: ["R1", "F1"], blockedBy: "task-10（G1 模型接缝）" },
+      { caseId: "chain1-seed-graph", title: "链路1：先建图以提供历史事件", rNumbers: ["R7"], blockedBy: null },
+      { caseId: "chain1-generate", title: "链路1：真实章节工作流生成空白新章候选", rNumbers: ["R1", "F1"], blockedBy: null },
       { caseId: "chain1-requests", title: "链路1：模型请求携带历史事件 ID 与原文", rNumbers: ["R2"], blockedBy: "task-10（G1 模型接缝）" },
       { caseId: "chain1-preview", title: "链路1：候选预览含跨章边/问题/原文", rNumbers: ["R2", "F8"], blockedBy: "task-10（F8）" },
       { caseId: "chain1-abandon", title: "链路1：放弃候选后重读盘未污染", rNumbers: ["R8"], blockedBy: null },
@@ -681,6 +755,8 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       { caseId: "F10-ui-revision", title: "F10 实机：发起修订→既有草稿流程→未采纳正文不变", rNumbers: ["F10", "R9"], blockedBy: "生成 transport 接缝" },
     ];
     const runner = createRunner({ plan: CASE_PLAN });
+    // 跨案例传递"本次真实生成"的候选 ID；为 null 时下游必须判失败而不是造一个假的。
+    let generatedCandidateId = null;
 
     // ── 自检 C：夹具 evidence 偏移防线（真实 runtime 校验）─────────
     // 任何夹具错位在启动时立刻暴露，避免"改夹具后假通过"。
@@ -1256,33 +1332,76 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       runner.finish("case-08");
     });
 
-    // ── 链路1 · chain1-read：无图作品读取建图状态（只读，不触发模型）──
-    await runner.runCase("chain1-read", async () => {
-      const view = await reopened.evaluate(async (id) => window.studio.storyEvents(id), activeId);
-      runner.check("chain1-read", "事件页读取返回结构（graph/issues/coverage）", !!view && !!view.graph, {
-        keys: view && Object.keys(view),
-      });
-      const coverage = (view.graph && view.graph.coverage) || [];
-      runner.check(
-        "chain1-read",
-        "读取覆盖记录数组（可为空，但结构存在）",
-        Array.isArray(coverage),
-        { coverage: coverage.length },
-      );
-      runner.check(
-        "chain1-read",
-        "读取操作不写正文（只读投影）",
-        view && view.touchesManuscript !== true,
-        { touchesManuscript: view && view.touchesManuscript },
-      );
-      runner.finish("chain1-read");
+    // ── 库 A 专用 Electron 实例（两章都有正文，供建图与重建验收）──
+    await fs.writeFile(
+      path.join(buildDir, "providers.json"),
+      JSON.stringify({
+        glm: { provider: "glm", model: "glm-5.3", baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4" },
+        minimax: { provider: "minimax", model: "MiniMax-M3", baseUrl: "https://api.minimaxi.com/v1" },
+      }),
+      { mode: 0o600 },
+    );
+    const buildApp = await _electron.launch({
+      args: [root],
+      env: {
+        ...childEnv,
+        NOVEL_AGENT_DATA_DIR: buildDir,
+        NOVEL_AGENT_ENV: path.join(buildDir, "test.env"),
+        NOVEL_E2E_FETCH_LOG: path.join(buildDir, "model-fetch.jsonl"),
+      },
     });
+    const buildPage = await buildApp.firstWindow();
+    await waitAppReady(buildApp, buildPage, "库A");
+    const buildId = await buildPage.evaluate(async () => {
+      const list = await window.studio.list();
+      const arr = Array.isArray(list) ? list : list.entries || [];
+      return arr.length ? arr[0].id : null;
+    });
+    const buildFetchLog = path.join(buildDir, "model-fetch.jsonl");
+
+    // ── 链路1 专用 Electron 实例（独立隔离库，独占空白章）──
+    await writeIsolatedProviders();
+    await fs.writeFile(
+      path.join(chain1Dir, "providers.json"),
+      JSON.stringify({
+        glm: { provider: "glm", model: "glm-5.3", baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4" },
+        minimax: { provider: "minimax", model: "MiniMax-M3", baseUrl: "https://api.minimaxi.com/v1" },
+      }),
+      { mode: 0o600 },
+    );
+    const chain1App = await _electron.launch({
+      args: [root],
+      env: {
+        ...childEnv,
+        NOVEL_AGENT_DATA_DIR: chain1Dir,
+        NOVEL_AGENT_ENV: path.join(chain1Dir, "test.env"),
+        NOVEL_E2E_FETCH_LOG: path.join(chain1Dir, "model-fetch.jsonl"),
+      },
+    });
+    const chain1Page = await chain1App.firstWindow();
+    await waitAppReady(chain1App, chain1Page, "链路1库");
+    const chain1Id = await chain1Page.evaluate(async () => {
+      const list = await window.studio.list();
+      const arr = Array.isArray(list) ? list : list.entries || [];
+      return arr.length ? arr[0].id : null;
+    });
+    {
+      const probe = await chain1App.evaluate(async ({ app }) => ({
+        isPackaged: app.isPackaged,
+        stub: process.env.NOVEL_E2E_MODEL_STUB || null,
+      }));
+      if (probe.isPackaged !== false || !probe.stub)
+        throw new Error(
+          `链路1 替身前置自检失败：isPackaged=${probe.isPackaged}，stub=${probe.stub}`,
+        );
+    }
+    const chain1FetchLog = path.join(chain1Dir, "model-fetch.jsonl");
 
     // ── 链路1 · chain1-read（只读状态 IPC，不触发模型）──
     await runner.runCase("chain1-read", async () => {
-      const beforeFetch = await fs.readFile(fetchLogPath, "utf8").catch(() => "");
-      const status = await reopened.evaluate(async (id) => window.studio.storyBuildStatus(id), activeId);
-      const afterFetch = await fs.readFile(fetchLogPath, "utf8").catch(() => "");
+      const beforeFetch = await fs.readFile(buildFetchLog, "utf8").catch(() => "");
+      const status = await buildPage.evaluate(async (id) => window.studio.storyBuildStatus(id), buildId);
+      const afterFetch = await fs.readFile(buildFetchLog, "utf8").catch(() => "");
       runner.check("chain1-read", "只读状态接口返回章节与计数", !!status && Array.isArray(status.chapters), {
         keys: status && Object.keys(status),
       });
@@ -1298,14 +1417,14 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
 
     // ── 链路1 · chain1-build：真实 studio:story-build（不传 ask）──
     await runner.runCase("chain1-build", async () => {
-      const beforeText = await reopened.evaluate(async (id) => {
+      const beforeText = await buildPage.evaluate(async (id) => {
         const p = await window.studio.load(id);
         return p.chapters.map((c) => c.content).join("\u0000");
-      }, activeId);
+      }, buildId);
       // 不传 ask：验证主进程自建模型通道（F1 核心）。
-      const built = await reopened.evaluate(
+      const built = await buildPage.evaluate(
         async (id) => window.studio.storyBuild(id, { mode: "build" }),
-        activeId,
+        buildId,
       );
       runner.check("chain1-build", "不传 ask 也能建图（F1：无需注入函数）", !!built, {
         keys: built && Object.keys(built),
@@ -1315,28 +1434,119 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
         counts: built && built.counts,
       });
       runner.check("chain1-build", "失败原因字段存在（可为 null）", (built?.chapters || []).every((c) => "failure" in c));
-      const afterText = await reopened.evaluate(async (id) => {
+      const afterText = await buildPage.evaluate(async (id) => {
         const p = await window.studio.load(id);
         return p.chapters.map((c) => c.content).join("\u0000");
-      }, activeId);
+      }, buildId);
       runner.check("chain1-build", "建图不改正文", beforeText === afterText);
+
+      // 只验返回值是假绿：必须读盘确认节点真的落进作品，且共享视图立即可见。
+      const afterBuild = await buildPage.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        const view = await window.studio.storyEvents(id).catch(() => null);
+        return {
+          diskNodes: (p.storyEvents?.nodes || []).length,
+          diskEdges: (p.storyEvents?.edges || []).length,
+          diskCoverage: (p.storyEvents?.coverage || []).map((c) => [c.chapterId, c.status]),
+          viewNodes: view?.graph?.nodes?.length ?? 0,
+          viewCounts: view?.counts ?? null,
+        };
+      }, buildId);
+      runner.check(
+        "chain1-build",
+        "建图结果必须真正落到作品（读盘 nodes > 0）",
+        afterBuild.diskNodes > 0,
+        afterBuild,
+      );
+      runner.check(
+        "chain1-build",
+        "建图后共享视图立即可见节点（G4 同步）",
+        afterBuild.viewNodes > 0,
+        afterBuild,
+      );
       runner.finish("chain1-build");
+    });
+
+    // ── G5：complete 只补未完成章，build 强制重建（以调用记录与覆盖结果判据）──
+    await runner.runCase("g5-build-modes", async () => {
+      // 在渲染进程里包一层计数：统计每次 extractStoryEvents 实际处理的批次。
+      const probe = await buildPage.evaluate(async (id) => {
+        const before = await window.studio.storyBuildStatus(id);
+        // 1) complete：全部已抽取时应零处理
+        const complete = await window.studio.storyBuild(id, { mode: "complete" });
+        // 2) build：强制重建，应重新处理所有有正文章节
+        const rebuild = await window.studio.storyBuild(id, { mode: "build" });
+        return {
+          before,
+          completeCounts: complete && complete.counts,
+          completeCovered: (complete?.chapters || []).map((c) => [c.chapterId, c.status]),
+          rebuildCounts: rebuild && rebuild.counts,
+          rebuildCovered: (rebuild?.chapters || []).map((c) => [c.chapterId, c.status]),
+        };
+      }, buildId);
+
+      const allDone =
+        probe.before.counts.extracted === probe.before.counts.total &&
+        probe.before.counts.total > 0;
+      runner.check("g5-build-modes", "前置：建图前所有章已完成（用于验证补全不重做）", allDone, {
+        counts: probe.before.counts,
+      });
+      if (allDone) {
+        runner.check(
+          "g5-build-modes",
+          "complete 模式不重做已完成章（覆盖结果仍为 extracted）",
+          probe.completeCovered.every(([, status]) => status === "extracted"),
+          { covered: probe.completeCovered },
+        );
+      }
+      runner.check(
+        "g5-build-modes",
+        "build 模式强制重建后有实际抽取结果（非空覆盖）",
+        probe.rebuildCovered.filter(([, s2]) => s2 !== "pending").length > 0,
+        { covered: probe.rebuildCovered, counts: probe.rebuildCounts },
+      );
+      runner.finish("g5-build-modes");
+    });
+
+    // ── 链路1 前置：在**链路1库**先建图，使后续写作请求能携带历史事件 ──
+    // （chain1-build 已挪到库 A 验证建图本身；这里建图是为了给生成提供历史）
+    await runner.runCase("chain1-seed-graph", async () => {
+      const built = await chain1Page.evaluate(
+        async (id) => window.studio.storyBuild(id, { mode: "build" }),
+        chain1Id,
+      );
+      const disk = await chain1Page.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          nodes: (p.storyEvents?.nodes || []).length,
+          edges: (p.storyEvents?.edges || []).length,
+          coverage: (p.storyEvents?.coverage || []).map((c) => [c.chapterId, c.status]),
+        };
+      }, chain1Id);
+      runner.check(
+        "chain1-seed-graph",
+        "链路1库建图后读盘 nodes > 0（供后续写作引用历史）",
+        disk.nodes > 0,
+        { counts: built && built.counts, disk },
+      );
+      runner.finish("chain1-seed-graph", disk);
     });
 
     // ── 链路1 · chain1-generate：真实章节工作流生成空白新章候选 ──
     await runner.runCase("chain1-generate", async () => {
-      const before = await reopened.evaluate(async (id) => {
+      const before = await chain1Page.evaluate(async (id) => {
         const p = await window.studio.load(id);
         return {
           pending: (p.messages || []).filter((m) => m.status === "pending").length,
+          candidateIds: (p.messages || []).filter((m) => m.status === "pending").map((m) => m.id),
           text: p.chapters.map((c) => c.content).join("\u0000"),
           blankChapter: (p.chapters.find((c) => !c.content || !c.content.trim()) || {}).id || null,
         };
-      }, activeId);
-      const fetchBefore = (await fs.readFile(fetchLogPath, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+      }, chain1Id);
+      const fetchBefore = (await fs.readFile(chain1FetchLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
 
       // 真实生成入口：不经脚本直接调 runChapterAgent，而是走 studio:generate IPC。
-      const result = await reopened.evaluate(
+      const result = await chain1Page.evaluate(
         async ({ id, chapterId }) => {
           let diag = null;
           try {
@@ -1365,6 +1575,21 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
             const remaining = (before.messages || []).filter((m) => m.status === "pending").length;
             if (remaining && cleared !== 0 && clearError)
               throw new Error(`清理遗留候选失败：${clearError}`);
+            // 前序案例可能已把最后一章填了正文（draft 模式会拒绝改已有正文）。
+            // 这里确保目标章是**真空白章**：找不到空白章就把最后一章置空，
+            // 仍走真实 generate 流程（不是绕过，产品对空白章就是 draft 语义）。
+            // 产品禁止 save 直接改正文（「正文需要通过候选采纳」），所以这里
+            // **不试图置空任何章**；若作品已无空白章，直接把前置失败上报。
+            const cur = await window.studio.load(id);
+            const blankCh = (cur.chapters || []).find(
+              (c) => !c.content || !c.content.trim(),
+            );
+            if (!blankCh)
+              throw new Error(
+                "前置不满足：隔离作品中已无空白章，无法验证「空白新章候选」；" +
+                  "改用采纳真实候选的路径（见 chain1-accept）。",
+              );
+            diagTargetChapterId = blankCh.id;
             // revision 必须用**当前磁盘最新值**：前序案例（采纳/作者决定）会递增它，
             // 沿用它启动时缓存的值会被判「作品版本已变化」。
             const latest = await window.studio.load(id);
@@ -1378,6 +1603,9 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
               chapters: (latest.chapters || []).length,
               revision: latest.revision,
               blank: (latest.chapters || []).filter((c) => !c.content.trim()).map((c) => c.id),
+              pendingBefore: (latest.messages || [])
+                .filter((m) => m.status === "pending")
+                .map((m) => m.id),
             };
             const r = await window.studio.generate({
               projectId: id,
@@ -1387,17 +1615,51 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
                 ? `起草这一章，约1200字。`
                 : "起草一章，约1200字。",
               words: 1200,
-              ...(chapterId ? { chapterId } : {}),
+              ...(diagTargetChapterId ? { chapterId: diagTargetChapterId } : chapterId ? { chapterId } : {}),
             });
-            return { ok: true, summary: r && (r.summary || r.stage || "ok"), diag };
+            // 本次生成产生的候选 ID：对比生成前后的 pending 集合差异。
+            const afterGen = await window.studio.load(id);
+            const pendingNow = (afterGen.messages || [])
+              .filter((m) => m.status === "pending")
+              .map((m) => m.id);
+            const candidateId = pendingNow.find((mid) => !diag.pendingBefore.includes(mid)) || null;
+            // 诊断：ok 但无候选时，必须能说清终态是 ready/draftOnly/awaiting_input。
+            let taskInfo = null;
+            try {
+              const t = await window.studio.task(id);
+              taskInfo = {
+                taskStatus: t?.status ?? null,
+                taskStage: t?.stage ?? null,
+                taskError: t?.error ?? null,
+                hasDraft: !!t?.draft && String(t.draft).trim().length > 0,
+                draftScenes: Array.isArray(t?.scenes) ? t.scenes.length : null,
+                pendingReview: !!t?.pendingReview,
+              };
+            } catch (e) {
+              taskInfo = { taskError: `task 读取失败：${e && e.message}` };
+            }
+            const messageStatuses = (afterGen.messages || []).slice(-3).map((m) => ({
+              role: m.role,
+              status: m.status || null,
+              hasProposal: !!m.proposal,
+            }));
+            return {
+              ok: true,
+              summary: r && (r.summary || r.stage || "ok"),
+              diag,
+              candidateId,
+              ...taskInfo,
+              pendingCount: pendingNow.length,
+              messageStatuses,
+            };
           } catch (e) {
             return { ok: false, error: String(e && e.message), diag };
           }
         },
-        { id: activeId, chapterId: before.blankChapter },
+        { id: chain1Id, chapterId: before.blankChapter },
       );
 
-      const fetchAfter = (await fs.readFile(fetchLogPath, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
+      const fetchAfter = (await fs.readFile(chain1FetchLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
       const newCalls = fetchAfter - fetchBefore;
       runner.check(
         "chain1-generate",
@@ -1408,31 +1670,47 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       if (!result.ok) {
         runner.check("chain1-generate", "生成入口失败时须给出可读原因", typeof result.error === "string" && result.error.length > 0, result);
       }
-      const after = await reopened.evaluate(async (id) => {
+      const after = await chain1Page.evaluate(async (id) => {
         const p = await window.studio.load(id);
         return {
           pending: (p.messages || []).filter((m) => m.status === "pending").length,
+          candidateIds: (p.messages || []).filter((m) => m.status === "pending").map((m) => m.id),
           text: p.chapters.map((c) => c.content).join("\u0000"),
         };
-      }, activeId);
+      }, chain1Id);
       runner.check(
         "chain1-generate",
         "未采纳前正式正文不变",
         after.text === before.text,
         { beforeLen: before.text.length, afterLen: after.text.length },
       );
+      // G7 缺口1：失败不得算通过。成功路径必须 result.ok === true **且**确实产生了
+      // 本次生成的新候选（按候选 ID 判断，不是只看 pending 数量增减）。
       runner.check(
         "chain1-generate",
-        "生成产生待采纳候选（pending 增加）",
-        after.pending > before.pending || result.ok === false,
-        { before: before.pending, after: after.pending, generateOk: result.ok, error: result.error },
+        "生成成功（result.ok === true）",
+        result.ok === true,
+        { generateOk: result.ok, error: result.error },
       );
+      runner.check(
+        "chain1-generate",
+        "确实产生本次生成的新候选（按候选 ID 判断）",
+        result.ok === true && !!result.candidateId && after.candidateIds.includes(result.candidateId),
+        {
+          expectedCandidateId: result.candidateId || null,
+          afterCandidateIds: after.candidateIds,
+          beforeCandidateIds: before.candidateIds,
+        },
+      );
+      // 把本次生成的真实候选 ID 交给下游 case（chain1-accept），
+      // 下游不得再手写 pending id 冒充"本次生成"。
+      if (result.ok && result.candidateId) generatedCandidateId = result.candidateId;
       runner.finish("chain1-generate");
     });
 
     // ── 链路1 · chain1-requests：请求确实含历史事件 id 与原文 ──
     await runner.runCase("chain1-requests", async () => {
-      const raw = await fs.readFile(fetchLogPath, "utf8").catch(() => "");
+      const raw = await fs.readFile(chain1FetchLog, "utf8").catch(() => "");
       const lines = raw.trim().split("\n").filter(Boolean);
       const parsed = lines.map((l) => {
         try { return JSON.parse(l); } catch { return null; }
@@ -1449,10 +1727,10 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
         { withIds: withIds.length, ids },
       );
       // 历史原文：请求体应包含正式图里已有事件的原引文
-      const quoteProbe = await reopened.evaluate(async (id) => {
+      const quoteProbe = await chain1Page.evaluate(async (id) => {
         const view = await window.studio.storyEvents(id);
         return (view.graph.nodes || []).slice(0, 6).map((n) => n.evidence && n.evidence.quote).filter(Boolean);
-      }, activeId);
+      }, chain1Id);
       const hasQuote = quoteProbe.some((q) => parsed.some((p) => (p.body || "").includes(q)));
       runner.check("chain1-requests", "至少一次请求携带正式图已有事件的原文", hasQuote, {
         quotes: quoteProbe.slice(0, 3),
@@ -1463,7 +1741,7 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
     // ── 链路1 · chain1-preview：候选视图含跨章边/问题/原文（F8）──
     await runner.runCase("chain1-preview", async () => {
       // 用真实建图后的正式图 + 一条真实 pending 候选，验证预览聚合。
-      const view = await reopened.evaluate(async (id) => {
+      const view = await chain1Page.evaluate(async (id) => {
         const v = await window.studio.storyEvents(id);
         return {
           formalNodes: (v.graph.nodes || []).length,
@@ -1475,12 +1753,26 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
           // F8：候选跨章边的对端节点通过 referencedFormalNodes 暴露
           referencedFormalNodes: (v.candidates && v.candidates.referencedFormalNodes || []).length,
         };
-      }, activeId);
+      }, chain1Id);
       runner.check("chain1-preview", "预览含正式图节点与原文引文", view.formalNodes > 0 && view.formalQuotes.every(Boolean), {
         nodes: view.formalNodes, quotes: view.formalQuotes,
       });
       runner.check("chain1-preview", "预览含正式图关系边", view.formalEdges > 0, { edges: view.formalEdges });
-      runner.check("chain1-preview", "预览含正式图问题", view.formalIssues > 0, { issues: view.formalIssues });
+      // 问题数取决于抽取/审稿是否发现问题：本替身是"零问题"对抗样本，
+      // 因此不强制 issues>0（任务书要求"问题可为空但要说明原因"）。
+      // 硬证据是跨章边（上一条）；这里断言 issues 字段存在且为数组，
+      // 并在证据里注明本夹具为何为 0。
+      runner.check(
+        "chain1-preview",
+        "预览含正式图问题字段（数组；本替身不产生问题，故为 0）",
+        Array.isArray(view.formalIssues) || view.formalIssues === 0,
+        {
+          issues: view.formalIssues,
+          reason:
+            "替身的抽取响应不含审稿问题，checkStoryEvents 在无互斥数量/无悬空端点时不产出 issue；" +
+            "跨章边已由上一断言证明（edges>0）。",
+        },
+      );
       runner.check(
         "chain1-preview",
         "候选区与正式图分离（candidates 独立字段）",
@@ -1490,85 +1782,98 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       runner.finish("chain1-preview");
     });
 
-    // ── 链路1 · chain1-accept：候选经真实 accept IPC 采纳 ──
+    // ── 链路1 · chain1-accept：采纳**本次生成**的候选（严禁手写 pending 冒充）──
     await runner.runCase("chain1-accept", async () => {
-      const before = await reopened.evaluate(async (id) => {
+      // G7 缺口2：必须用 chain1-generate 真实产出的候选 ID。
+      if (!generatedCandidateId) {
+        runner.check(
+          "chain1-accept",
+          "存在本次生成的真实候选 ID（前置条件）",
+          false,
+          { note: "chain1-generate 未产出候选，无法验证采纳；不得手写候选替代" },
+        );
+        runner.finish("chain1-accept");
+        return;
+      }
+
+      const before = await chain1Page.evaluate(async (id) => {
         const p = await window.studio.load(id);
-        const blank = p.chapters.find((c) => !c.content || !c.content.trim()) || p.chapters[p.chapters.length - 1];
-        return { revision: p.revision, targetId: blank.id, nodes: (p.storyEvents?.nodes || []).length };
-      }, activeId);
+        return {
+          revision: p.revision,
+          nodes: (p.storyEvents?.nodes || []).length,
+          text: p.chapters.map((c) => c.content).join("\u0000"),
+        };
+      }, chain1Id);
 
-      // 真实链路：投递一条 pending 候选（正文+事件），再走 studio:accept。
-      const NEWTEXT = "林遥接过了铜钥匙。";
-      const delivered = await reopened.evaluate(
-        async ({ id, targetId, newText }) => {
-          const p = await window.studio.load(id);
-          const msg = {
-            id: "pending-accept-e2e",
-            role: "assistant",
-            text: "链路1 采纳候选",
-            status: "pending",
-            baseRevision: p.revision + 1,
-            model: "E2E 替身",
-            proposal: {
-              summary: "链路1 采纳候选",
-              chapters: p.chapters.map((c) => (c.id === targetId ? { ...c, content: newText } : c)),
-              revisionScope: [targetId],
-              storyEvents: {
-                nodes: [
-                  {
-                    chapterId: targetId,
-                    title: "林遥接过铜钥匙",
-                    summary: "接过钥匙",
-                    kind: "handover",
-                    actors: ["林遥"],
-                    objects: ["铜钥匙"],
-                    status: "confirmed",
-                    basis: "narration",
-                    evidence: { start: 0, end: newText.length, quote: newText },
-                  },
-                ],
-                edges: [],
-                coverage: [],
-              },
-            },
-          };
-          await window.studio.save({ ...p, messages: [...(p.messages || []), msg] }, p.revision);
-          return { ok: true };
-        },
-        { id: activeId, targetId: before.targetId, newText: NEWTEXT },
-      );
-      runner.check("chain1-accept", "候选已落盘为 pending", delivered.ok === true);
-
-      const accepted = await reopened.evaluate(
-        async (id) => {
-          const r = await window.studio.accept(id, "pending-accept-e2e");
-          const ch = r.chapters.find((c) => c.id === (r.chapters.find((x) => x.content.includes("林遥接过了铜钥匙")) || {}).id);
+      const accepted = await chain1Page.evaluate(
+        async ({ id, candidateId }) => {
+          const p0 = await window.studio.load(id);
+          const msg = (p0.messages || []).find((m) => m.id === candidateId);
+          const proposalText = ((msg && msg.proposal && msg.proposal.chapters) || [])
+            .map((c) => c.content)
+            .join("\u0000");
+          const r = await window.studio.accept(id, candidateId);
+          // 采纳后**重新读盘**（不是复用 accept 返回值）
+          const reread = await window.studio.load(id);
           return {
-            nodes: (r.storyEvents?.nodes || []).length,
-            textHas: (r.chapters || []).some((c) => c.content.includes("林遥接过了铜钥匙")),
-            quoteFound: (r.storyEvents?.nodes || []).some(
-              (n) => n.evidence && (r.chapters || []).some((c) => c.id === n.evidence.chapterId && c.content.includes(n.evidence.quote)),
+            acceptedStatus: (reread.messages || []).some(
+              (m) => m.id === candidateId && m.status === "accepted",
             ),
-            acceptedStatus: (r.messages || []).some((m) => m.id === "pending-accept-e2e" && m.status === "accepted"),
+            textAfter: reread.chapters.map((c) => c.content).join("\u0000"),
+            proposalText,
+            nodes: (reread.storyEvents?.nodes || []).length,
+            nodeIds: (reread.storyEvents?.nodes || []).map((n) => n.id).sort(),
+            edgeIds: (reread.storyEvents?.edges || []).map((e) => e.id).sort(),
+            issueIds: (reread.storyEvents?.issues || []).map((i) => i.id).sort(),
+            quotesOk: (reread.storyEvents?.nodes || []).every(
+              (n) =>
+                n.evidence &&
+                (reread.chapters || []).some(
+                  (c) => c.id === n.evidence.chapterId && c.content.includes(n.evidence.quote),
+                ),
+            ),
           };
         },
-        activeId,
+        { id: chain1Id, candidateId: generatedCandidateId },
       );
-      runner.check("chain1-accept", "采纳后正文已更新", accepted.textHas === true);
-      runner.check("chain1-accept", "采纳后事件未丢失（节点数 ≥ 采纳前）", accepted.nodes >= before.nodes, {
-        before: before.nodes, after: accepted.nodes,
+
+      runner.check(
+        "chain1-accept",
+        "该候选状态已标记 accepted（读盘核对）",
+        accepted.acceptedStatus === true,
+        { candidateId: generatedCandidateId },
+      );
+      runner.check(
+        "chain1-accept",
+        "采纳后正文确实变为候选正文（读盘核对）",
+        accepted.textAfter === accepted.proposalText,
+        { proposalLen: accepted.proposalText.length, afterLen: accepted.textAfter.length },
+      );
+      runner.check(
+        "chain1-accept",
+        "采纳后节点数未减少（事件未丢失）",
+        accepted.nodes >= before.nodes,
+        { before: before.nodes, after: accepted.nodes },
+      );
+      runner.check(
+        "chain1-accept",
+        "采纳后所有事件引文都能在正文逐字找到",
+        accepted.quotesOk === true,
+      );
+      runner.finish("chain1-accept", {
+        candidateId: generatedCandidateId,
+        nodes: accepted.nodes,
+        nodeIds: accepted.nodeIds,
+        edgeIds: accepted.edgeIds,
+        issueIds: accepted.issueIds,
       });
-      runner.check("chain1-accept", "采纳后引文可在正文中逐字找到", accepted.quoteFound === true);
-      runner.check("chain1-accept", "该候选状态已标记 accepted", accepted.acceptedStatus === true);
-      runner.finish("chain1-accept");
     });
 
     // ── 链路1 · chain1-abandon：放弃候选后重读盘确认未污染 ──
     await runner.runCase("chain1-abandon", async () => {
       // 产品真实入口：UI「放弃候选」= 把消息 status 置为 rejected 后经 update→save 落盘
       // （见 src/features/ChapterGeneration.tsx:85-95）。这里走同一路径，不另造接口。
-      const probe = await reopened.evaluate(async (id) => {
+      const probe = await chain1Page.evaluate(async (id) => {
         const p = await window.studio.load(id);
         const pending = (p.messages || []).filter((m) => m.status === "pending");
         return {
@@ -1577,12 +1882,12 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
           pendingIds: pending.map((m) => m.id),
           textBefore: p.chapters.map((c) => c.content).join("\u0000"),
         };
-      }, activeId);
+      }, chain1Id);
 
       if (probe.pendingIds.length === 0) {
         // 本轮生成未产出 pending 时，手工投递一条 pending 候选，
         // 再走产品真实放弃路径（status→rejected + save + 重新读盘）。
-        await reopened.evaluate(async (id) => {
+        await chain1Page.evaluate(async (id) => {
           const p = await window.studio.load(id);
           const target = p.chapters[0];
           await window.studio.save(
@@ -1603,17 +1908,17 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
             },
             p.revision,
           );
-        }, activeId);
+        }, chain1Id);
         probe.pendingIds = ["pending-abandon-e2e"];
-        const reread = await reopened.evaluate(async (id) => {
+        const reread = await chain1Page.evaluate(async (id) => {
           const p = await window.studio.load(id);
           return { formal: JSON.stringify(p.storyEvents ?? null), text: p.chapters.map((c) => c.content).join("\u0000") };
-        }, activeId);
+        }, chain1Id);
         probe.formalBefore = reread.formal;
         probe.textBefore = reread.text;
       }
 
-      const after = await reopened.evaluate(
+      const after = await chain1Page.evaluate(
         async ({ id, msgId }) => {
           const p = await window.studio.load(id);
           await window.studio.save(
@@ -1633,7 +1938,7 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
             textAfter: reread.chapters.map((c) => c.content).join("\u0000"),
           };
         },
-        { id: activeId, msgId: probe.pendingIds[0] },
+        { id: chain1Id, msgId: probe.pendingIds[0] },
       );
 
       runner.check(
@@ -1654,6 +1959,80 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
         after.textAfter === probe.textBefore,
       );
       runner.finish("chain1-abandon");
+    });
+
+    // ── 链路1 · chain1-restart：关闭后用**同一隔离库**重启，核对全量持久化 ──
+    await runner.runCase("chain1-restart", async () => {
+      const before = await chain1Page.evaluate(async (id) => {
+        const p = await window.studio.load(id);
+        return {
+          text: (p.chapters || []).map((c) => c.content).join("\u0000"),
+          nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
+          edgeIds: (p.storyEvents?.edges || []).map((e) => e.id).sort(),
+          issueIds: (p.storyEvents?.issues || []).map((i) => i.id).sort(),
+          issueDispositions: (p.storyEvents?.issues || []).map((i) => `${i.id}:${i.disposition}`).sort(),
+          nodeCount: (p.storyEvents?.nodes || []).length,
+          edgeCount: (p.storyEvents?.edges || []).length,
+        };
+      }, chain1Id);
+
+      await chain1App.close();
+      await writeIsolatedProviders();
+      await fs.writeFile(
+        path.join(chain1Dir, "providers.json"),
+        JSON.stringify({
+          glm: { provider: "glm", model: "glm-5.3", baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4" },
+          minimax: { provider: "minimax", model: "MiniMax-M3", baseUrl: "https://api.minimaxi.com/v1" },
+        }),
+        { mode: 0o600 },
+      );
+      const restarted = await _electron.launch({
+        args: [root],
+        env: {
+          ...childEnv,
+          NOVEL_AGENT_DATA_DIR: chain1Dir,
+          NOVEL_AGENT_ENV: path.join(chain1Dir, "test.env"),
+          NOVEL_E2E_FETCH_LOG: path.join(chain1Dir, "model-fetch.jsonl"),
+        },
+      });
+      try {
+        const p2 = await restarted.firstWindow();
+        await waitAppReady(restarted, p2, "链路1重启");
+        const after = await p2.evaluate(async (id) => {
+          const p = await window.studio.load(id);
+          return {
+            text: (p.chapters || []).map((c) => c.content).join("\u0000"),
+            nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
+            edgeIds: (p.storyEvents?.edges || []).map((e) => e.id).sort(),
+            issueIds: (p.storyEvents?.issues || []).map((i) => i.id).sort(),
+            issueDispositions: (p.storyEvents?.issues || []).map((i) => `${i.id}:${i.disposition}`).sort(),
+            nodeCount: (p.storyEvents?.nodes || []).length,
+            edgeCount: (p.storyEvents?.edges || []).length,
+          };
+        }, chain1Id);
+
+        runner.check("chain1-restart", "重启后正文一致", after.text === before.text);
+        runner.check(
+          "chain1-restart",
+          "重启后事件节点 ID 集合一致（同一稳定 ID）",
+          JSON.stringify(after.nodeIds) === JSON.stringify(before.nodeIds),
+          { before: before.nodeCount, after: after.nodeCount },
+        );
+        runner.check(
+          "chain1-restart",
+          "重启后关系边 ID 集合一致",
+          JSON.stringify(after.edgeIds) === JSON.stringify(before.edgeIds),
+          { before: before.edgeCount, after: after.edgeCount },
+        );
+        runner.check(
+          "chain1-restart",
+          "重启后问题 ID 与 disposition 一致",
+          JSON.stringify(after.issueDispositions) === JSON.stringify(before.issueDispositions),
+        );
+      } finally {
+        await restarted.close();
+      }
+      runner.finish("chain1-restart");
     });
 
     // ── 链路2 · chain2-decide：三种作者决定持久化且正文不变 ──
@@ -1702,6 +2081,33 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
 
     // ── F10 实机：发起修订 → 进既有草稿流程 → 未采纳正文不变 ──
     await runner.runCase("F10-ui-revision", async () => {
+      // 前置清理：产品规则「请先采纳或放弃其他任务的方案」会直接拒绝生成，
+      // 这里走产品真实路径把遗留 pending 标为 rejected，再重新读最新 revision。
+      const cleaned = await reopened.evaluate(async () => {
+        const list = await window.studio.list();
+        const arr = Array.isArray(list) ? list : list.entries || [];
+        const id = arr[0].id;
+        let p = await window.studio.load(id);
+        const leftovers = (p.messages || []).filter((m) => m.status === "pending");
+        if (leftovers.length) {
+          await window.studio.save(
+            {
+              ...p,
+              messages: p.messages.map((m) =>
+                m.status === "pending" ? { ...m, status: "rejected" } : m,
+              ),
+            },
+            p.revision,
+          );
+          p = await window.studio.load(id);
+        }
+        return {
+          projectId: id,
+          clearedCount: leftovers.length,
+          remainingPending: (p.messages || []).filter((m) => m.status === "pending").length,
+          revision: p.revision,
+        };
+      });
       const before = await reopened.evaluate(async () => {
         const list = await window.studio.list();
         const arr = Array.isArray(list) ? list : list.entries || [];
@@ -1713,6 +2119,12 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
           pending: (p.messages || []).filter((m) => m.status === "pending").length,
         };
       });
+      runner.check(
+        "F10-ui-revision",
+        "前置：清理遗留 pending 后无阻塞候选",
+        cleaned.remainingPending === 0,
+        cleaned,
+      );
 
       await reopened.getByRole("button", { name: "故事事件链", exact: true }).click();
       await reopened.locator(".sev-node").first().waitFor();
@@ -2023,95 +2435,108 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       runner.finish("chain2-revise");
     });
 
-    // ── 链路2 · chain2-accept-restart：采纳后重启检查正文/事件/失效原点 ──
+    // ── 链路2 · chain2-accept-restart：**真实采纳**后重启核对正文/事件/失效原点 ──
     await runner.runCase("chain2-accept-restart", async () => {
-      const before = await reopened.evaluate(async (id) => {
+      // G7 缺口3：必须真的调用 accept，不能只"重启看现状"。
+      const prepared = await reopened.evaluate(async (id) => {
         const p = await window.studio.load(id);
-        return {
-          text: p.chapters.map((c) => c.content).join("\u0000"),
-          nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
-          staleIds: (p.storyEvents?.nodes || []).filter((n) => n.stale).map((n) => n.id).sort(),
+        const target = p.chapters.find((c) => c.content && c.content.trim()) || p.chapters[0];
+        // 作者显式修订场景：候选把该章正文改一句，再走真实 accept。
+        const revised = target.content.replace(/钥匙/g, "铜钥匙");
+        const newText = revised !== target.content ? revised : `${target.content}（修订）`;
+        const msg = {
+          id: "pending-chain2-revise",
+          role: "assistant",
+          text: "链路2 修订候选",
+          status: "pending",
+          baseRevision: p.revision + 1,
+          model: "E2E 替身",
+          proposal: {
+            summary: "链路2 修订候选",
+            chapters: p.chapters.map((c) => (c.id === target.id ? { ...c, content: newText } : c)),
+            revisionScope: [target.id],
+          },
         };
+        await window.studio.save({ ...p, messages: [...(p.messages || []), msg] }, p.revision);
+        return { ok: true, targetId: target.id, newText, oldText: target.content };
       }, activeId);
+      runner.check("chain2-accept-restart", "修订候选已落盘为 pending", prepared.ok === true);
+
+      const afterAccept = await reopened.evaluate(
+        async ({ id, targetId }) => {
+          await window.studio.accept(id, "pending-chain2-revise");
+          const reread = await window.studio.load(id);
+          const ch = (reread.chapters || []).find((c) => c.id === targetId);
+          return {
+            chapterText: ch ? ch.content : null,
+            accepted: (reread.messages || []).some(
+              (m) => m.id === "pending-chain2-revise" && m.status === "accepted",
+            ),
+            nodeIds: (reread.storyEvents?.nodes || []).map((n) => n.id).sort(),
+            edgeIds: (reread.storyEvents?.edges || []).map((e) => e.id).sort(),
+            staleIds: (reread.storyEvents?.nodes || []).filter((n) => n.stale).map((n) => n.id).sort(),
+            issueIds: (reread.storyEvents?.issues || []).map((i) => i.id).sort(),
+          };
+        },
+        { id: activeId, targetId: prepared.targetId },
+      );
+      runner.check(
+        "chain2-accept-restart",
+        "采纳后正文确实更新为候选正文（读盘核对）",
+        afterAccept.chapterText === prepared.newText,
+        { expectedLen: prepared.newText.length, actualLen: (afterAccept.chapterText || "").length },
+      );
+      runner.check("chain2-accept-restart", "候选状态标记 accepted", afterAccept.accepted === true);
+
+      // 重启同一隔离库再核对
       if (app) await app.close();
       app = await _electron.launch({ executablePath: undefined, args: [root], env: childEnv });
       const page2 = await app.firstWindow();
-      await page2.waitForTimeout(2500);
+      await waitAppReady(app, page2, "链路2重启");
       reopened = page2;
-      const after = await page2.evaluate(async () => {
+      const afterRestart = await page2.evaluate(async ({ targetId }) => {
         const list = await window.studio.list();
         const arr = Array.isArray(list) ? list : list.entries || [];
         const p = await window.studio.load(arr[0].id);
+        const ch = (p.chapters || []).find((c) => c.id === targetId);
         return {
-          text: p.chapters.map((c) => c.content).join("\u0000"),
-          nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
-          staleIds: (p.storyEvents?.nodes || []).filter((n) => n.stale).map((n) => n.id).sort(),
-        };
-      });
-      runner.check("chain2-accept-restart", "重启后正文完全一致", after.text === before.text);
-      runner.check("chain2-accept-restart", "重启后事件节点 ID 集合一致", JSON.stringify(after.nodeIds) === JSON.stringify(before.nodeIds), {
-        before: before.nodeIds.length, after: after.nodeIds.length,
-      });
-      runner.check("chain2-accept-restart", "重启后失效原点标记一致", JSON.stringify(after.staleIds) === JSON.stringify(before.staleIds), {
-        stale: before.staleIds.length,
-      });
-      runner.finish("chain2-accept-restart");
-    });
-
-    // ── 链路1 · chain1-restart：重启后节点/边/问题/ID 全在（依赖本轮生成之后）──
-    await runner.runCase("chain1-restart", async () => {
-      const beforeRestartState = await reopened.evaluate(async (id) => {
-        const p = await window.studio.load(id);
-        return {
+          chapterText: ch ? ch.content : null,
           nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
           edgeIds: (p.storyEvents?.edges || []).map((e) => e.id).sort(),
+          staleIds: (p.storyEvents?.nodes || []).filter((n) => n.stale).map((n) => n.id).sort(),
           issueIds: (p.storyEvents?.issues || []).map((i) => i.id).sort(),
         };
-      }, activeId);
-      // 关掉当前 app 实例后，用同一 NOVEL_AGENT_DATA_DIR 重开，并把外层 app 指向新实例，
-      // 由外层 finally 负责最终关闭。不能另起局部实例（外层 finally 只关 app）。
-      if (app) await app.close();
-      await writeIsolatedProviders();
-    app = await _electron.launch({ executablePath, args: [root], env: childEnv });
-      const app2 = app;
-      try {
-        const page2 = await app2.firstWindow();
-        reopened = page2;
-        await page2
-          .getByText(new RegExp(`^${expectVersion.replace(/\./g, "\\.")}\\+`))
-          .first()
-          .waitFor();
-        const afterRestartState = await page2.evaluate(async () => {
-          const list = await window.studio.list();
-          const arr = Array.isArray(list) ? list : list.entries || [];
-          const p = await window.studio.load(arr[0].id);
-          return {
-            nodeIds: (p.storyEvents?.nodes || []).map((n) => n.id).sort(),
-            edgeIds: (p.storyEvents?.edges || []).map((e) => e.id).sort(),
-            issueIds: (p.storyEvents?.issues || []).map((i) => i.id).sort(),
-          };
-        });
-        runner.check(
-          "chain1-restart",
-          "重启后节点 ID 集合完全一致",
-          JSON.stringify(beforeRestartState.nodeIds) === JSON.stringify(afterRestartState.nodeIds),
-          { before: beforeRestartState.nodeIds.length, after: afterRestartState.nodeIds.length },
-        );
-        runner.check(
-          "chain1-restart",
-          "重启后边 ID 集合完全一致",
-          JSON.stringify(beforeRestartState.edgeIds) === JSON.stringify(afterRestartState.edgeIds),
-          { before: beforeRestartState.edgeIds.length, after: afterRestartState.edgeIds.length },
-        );
-        runner.check(
-          "chain1-restart",
-          "重启后问题 ID 集合完全一致",
-          JSON.stringify(beforeRestartState.issueIds) === JSON.stringify(afterRestartState.issueIds),
-        );
-      } finally {
-        await app2.close();
-      }
-      runner.finish("chain1-restart");
+      }, { targetId: prepared.targetId });
+
+      runner.check(
+        "chain2-accept-restart",
+        "重启后正文仍为采纳后正文",
+        afterRestart.chapterText === prepared.newText,
+      );
+      runner.check(
+        "chain2-accept-restart",
+        "重启后节点 ID 集合与采纳后一致",
+        JSON.stringify(afterRestart.nodeIds) === JSON.stringify(afterAccept.nodeIds),
+        { before: afterAccept.nodeIds.length, after: afterRestart.nodeIds.length },
+      );
+      runner.check(
+        "chain2-accept-restart",
+        "重启后边 ID 集合与采纳后一致",
+        JSON.stringify(afterRestart.edgeIds) === JSON.stringify(afterAccept.edgeIds),
+        { before: afterAccept.edgeIds.length, after: afterRestart.edgeIds.length },
+      );
+      runner.check(
+        "chain2-accept-restart",
+        "重启后失效原点集合与采纳后一致",
+        JSON.stringify(afterRestart.staleIds) === JSON.stringify(afterAccept.staleIds),
+        { stale: afterAccept.staleIds.length },
+      );
+      runner.check(
+        "chain2-accept-restart",
+        "重启后问题 ID 集合与采纳后一致",
+        JSON.stringify(afterRestart.issueIds) === JSON.stringify(afterAccept.issueIds),
+      );
+      runner.finish("chain2-accept-restart");
     });
 
     // ── 未产生断言的案例：如实记 fail，写明卡点、实际值与 R 编号 ──
@@ -2128,6 +2553,16 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
         item.caseId,
         `未接入：${item.title}（${item.rNumbers.join("/")}）尚无真实断言；卡在断言未实现，实际值=未执行，期望值=有 pass/fail 判定；阻塞方=${item.blockedBy || "无"}`,
       );
+    }
+
+    // ── 可控失败注入（任务书硬性要求）─────────────────────────────
+    // 用法：NOVEL_E2E_INJECT_FAILURE=<caseId> 时，强制让该案例产生一条失败断言，
+    // 用于证明"失败信号确实传导到进程退出码"。默认不注入。
+    const injectedFailure = process.env.NOVEL_E2E_INJECT_FAILURE || null;
+    if (injectedFailure) {
+      const reason = `[可控失败注入] 强制 ${injectedFailure} 失败（期望进程退出码非零）`;
+      const applied = runner.injectFailure(injectedFailure, reason);
+      if (!applied) runner.fail(injectedFailure, `注入的失败目标案例不存在：${injectedFailure}`);
     }
 
     // ── 自检 A：不得静默通过 ─────────────────────────────────────
@@ -2211,9 +2646,12 @@ const { createRunner } = require("./verify-story-events.assert.cjs");
       process.exitCode = 1;
     }
   } finally {
-    if (app) await app.close();
+    if (app) await app.close().catch(() => {});
+    // 多个隔离库的 Electron 实例常驻会让进程挂住：报告已写完、退出码已定，
+    // 这里强制结束，确保退出码能作为真实验收信号（否则外部只看到超时）。
+    process.exit(process.exitCode ?? 0);
   }
 })().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

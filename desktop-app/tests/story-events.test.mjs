@@ -1858,3 +1858,90 @@ test("mergeStoryEvents 带 knownNodeIds 时指向外部节点的边通过收尾�
   }
   assert.ok(rejected, "缺少 knownNodeIds 时必须明确拒绝，而不是静默放行");
 });
+
+// ===== G2：同句往返交接必须保留两个身份 =====
+
+test("G2 同一句内往返交接保留两个事件身份与关系", () => {
+  const content = "甲把钥匙交给乙，乙检查后又把钥匙还给甲。";
+  const chapter = {
+    id: "ch-g2",
+    number: 1,
+    title: "往返",
+    summary: "",
+    content,
+  };
+  // 两次交接共用整句引文（不得改成两段不重叠引文来规避）。
+  const wholeQuote = content;
+  const make = (title) => ({
+    chapterId: "ch-g2",
+    title,
+    summary: "",
+    kind: "handover",
+    actors: ["甲", "乙"],
+    objects: ["钥匙"],
+    basis: "narration",
+    storyTime: "",
+    evidence: { start: 0, end: content.length, quote: wholeQuote },
+  });
+  const merged = mergeStoryEvents(
+    emptyStoryEvents(),
+    [make("甲把钥匙交给乙"), make("乙把钥匙还给甲")],
+    { chapters: [chapter] },
+  );
+  assert.equal(
+    merged.storyEvents.nodes.length,
+    2,
+    "往返交接必须保留两个身份，实际：" +
+      JSON.stringify(merged.storyEvents.nodes.map((n) => n.title)),
+  );
+  const ids = merged.storyEvents.nodes.map((n) => n.id);
+  assert.equal(new Set(ids).size, 2, "两个事件不得复用同一 ID");
+
+  const linked = mergeStoryEvents(merged.storyEvents, [], {
+    chapters: [chapter],
+    edges: [
+      {
+        source: ids[0],
+        target: ids[1],
+        type: "state-transfer",
+        basis: "explicit",
+        explanation: "先交出，检查后归还",
+        evidence: [
+          { chapterId: "ch-g2", start: 0, end: content.length, quote: wholeQuote },
+        ],
+      },
+    ],
+  }).storyEvents;
+  assert.ok(
+    linked.edges.find((e) => e.source === ids[0] && e.target === ids[1]),
+    "往返关系必须建立且端点各自独立",
+  );
+});
+
+test("G2 真正同一事件重抽仍不重复，已有边不改指", () => {
+  const content = "甲把钥匙交给乙。";
+  const chapter = {
+    id: "ch-g2b",
+    number: 1,
+    title: "单次",
+    summary: "",
+    content,
+  };
+  const draft = {
+    chapterId: "ch-g2b",
+    title: "甲把钥匙交给乙",
+    summary: "",
+    kind: "handover",
+    actors: ["甲", "乙"],
+    objects: ["钥匙"],
+    basis: "narration",
+    storyTime: "",
+    evidence: { start: 0, end: content.length, quote: content },
+  };
+  const first = mergeStoryEvents(emptyStoryEvents(), [draft], {
+    chapters: [chapter],
+  }).storyEvents;
+  const second = mergeStoryEvents(first, [draft], { chapters: [chapter] });
+  assert.equal(second.storyEvents.nodes.length, 1, "同一事件重抽不得新增节点");
+  assert.equal(second.storyEvents.nodes[0].id, first.nodes[0].id);
+});

@@ -27,6 +27,31 @@ export function storyBuildLabel(progress: StoryBuildProgress | null): string {
   return "重新建立事件图";
 }
 
+// G5：主动作按钮的语义。未建图=建立；已部分/全部建图=补全（只补未完成章）。
+// 「重新建立」是独立的强制重建动作，不能和补全共用一个按钮。
+export function primaryBuildMode(
+  progress: StoryBuildProgress | null,
+): "build" | "complete" {
+  if (!progress) return "build";
+  const done =
+    progress.counts.extracted + progress.counts.partial + progress.counts.failed;
+  return done === 0 ? "build" : "complete";
+}
+
+// G5：主动作按钮文案，与 primaryBuildMode 严格一致。
+export function primaryBuildLabel(progress: StoryBuildProgress | null): string {
+  return primaryBuildMode(progress) === "build" ? "建立事件图" : "补全事件图";
+}
+
+// G5：只有已经建过图（有覆盖记录）才允许"重新建立"，避免无意义全量重跑。
+export function canRebuild(
+  progress: StoryBuildProgress | null,
+): boolean {
+  if (!progress || !progress.enabled || !progress.hasContent) return false;
+  if (progress.state === "running") return false;
+  return progress.counts.extracted + progress.counts.partial > 0;
+}
+
 // R7：是否可以触发建图。未启用（浏览器预览）或没有正文时必须禁用。
 export function canStartStoryBuild(progress: StoryBuildProgress | null): boolean {
   if (!progress) return false;
@@ -394,13 +419,16 @@ export function useStoryEvents() {
       try {
         const next = await bridge.storyBuild(project!.projectId, { mode });
         setBuild(next);
+        // G4/F9 同源：建图会写作品并递增 revision，
+        // 只更新局部 build 会让共享 project 停在旧 revision，后续保存被拒。
+        await refresh();
         return next;
       } catch (e) {
         setBuildError((e as Error).message);
         return null;
       }
     },
-    [project?.projectId],
+    [project?.projectId, refresh],
   );
 
   const statusCounts = useMemo(() => {

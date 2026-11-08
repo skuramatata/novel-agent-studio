@@ -28,6 +28,7 @@ import {
   ListChecks,
   Maximize2,
   Quote,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
   X,
@@ -46,8 +47,11 @@ import type {
 import { isDesktop } from "../lib/bridge";
 import {
   STORY_DECISION_ACTIONS,
+  canRebuild,
   canStartStoryBuild,
   issueNeedsDecision,
+  primaryBuildLabel,
+  primaryBuildMode,
   storyBuildLabel,
   storyBuildSummary,
   needsReview,
@@ -1039,6 +1043,7 @@ export function StoryEvents() {
           )}
         </div>
         <div className="sev-build-actions">
+          {/* G5 主操作：未建图→建立（重建全部目标章）；已建图→补全（只补未完成章） */}
           <button
             className="primary sev-build-btn"
             disabled={!canStartStoryBuild(build) || build?.state === "running"}
@@ -1047,17 +1052,27 @@ export function StoryEvents() {
                 ? "该功能需要桌面端支持"
                 : build && !build.hasContent
                   ? "作品还没有正文"
-                  : "对已采纳正文建立或补全事件图"
+                  : primaryBuildMode(build) === "build"
+                    ? "对已采纳正文建立事件图（会重建目标章）"
+                    : "只补未完成的章节，已完成章节不会被重做"
             }
-            onClick={() =>
-              void startBuild(
-                build && build.counts.extracted > 0 ? "complete" : "build",
-              )
-            }
+            onClick={() => void startBuild(primaryBuildMode(build))}
           >
             <Sparkles size={14} />
-            {storyBuildLabel(build)}
+            {primaryBuildLabel(build)}
           </button>
+          {/* G5 独立动作：强制重建全部目标章，仅在已建过图时出现 */}
+          {canRebuild(build) && (
+            <button
+              className="sev-build-btn sev-rebuild-btn"
+              disabled={build?.state === "running"}
+              title="强制重建全部目标章节的事件图；会重新请求模型，已完成章节也会重做"
+              onClick={() => void startBuild("build")}
+            >
+              <RotateCcw size={13} />
+              重新建立
+            </button>
+          )}
           {build && !build.enabled && (
             <span className="small muted">该功能需要桌面端支持</span>
           )}

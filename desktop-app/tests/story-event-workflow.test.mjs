@@ -82,6 +82,7 @@ const draftNode = (source, patch = {}) => ({
   objects: patch.objects ?? [],
   basis: patch.basis ?? "narration",
   status: patch.status ?? "confirmed",
+  ...(patch.storyTime !== undefined ? { storyTime: patch.storyTime } : {}),
   evidence: {
     start: patch.start ?? 0,
     end: patch.end ?? source.content.length,
@@ -1448,5 +1449,240 @@ test("F11 数量只写在原文证据里、标题无数字时正常变化不误�
     checked.issues.filter((i) => i.kind === "state-break").length,
     0,
     "数量只写在逐字证据里的正常变化不得误报",
+  );
+});
+
+// ===== G1：过滤无效事件后关系编号不得错移 =====
+
+test("G1 首个事件被拒后，关系仍按模型原始序号连接正确事件", async () => {
+  const p = withContent();
+  const content = "乙拾起钥匙。丙打开门。丁离开屋子。";
+  const ch30 = { id: "ch30", number: 30, title: "原始序号", summary: "", content };
+  const project30 = { ...p, chapters: [...p.chapters, ch30] };
+  const sp = (quote) => {
+    const start = content.indexOf(quote);
+    return { start, end: start + quote.length, quote };
+  };
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          // 第 1 个事件引文不存在 → 会被拒绝
+          title: "被拒事件",
+          summary: "",
+          kind: "action",
+          actors: ["甲"],
+          objects: ["无"],
+          basis: "narration",
+          quote: "这句原文根本不存在于正文里",
+        },
+        {
+          title: "乙拾起钥匙",
+          summary: "",
+          kind: "action",
+          actors: ["乙"],
+          objects: ["钥匙"],
+          basis: "narration",
+          ...sp("乙拾起钥匙。"),
+        },
+        {
+          title: "丙打开门",
+          summary: "",
+          kind: "action",
+          actors: ["丙"],
+          objects: ["门"],
+          basis: "narration",
+          ...sp("丙打开门。"),
+        },
+        {
+          title: "丁离开屋子",
+          summary: "",
+          kind: "action",
+          actors: ["丁"],
+          objects: ["屋子"],
+          basis: "narration",
+          ...sp("丁离开屋子。"),
+        },
+      ],
+      relations: [
+        {
+          sourceId: 2,
+          targetId: 3,
+          type: "causal",
+          basis: "explicit",
+          explanation: "乙拾到钥匙后丙才开门",
+          evidenceSourceId: 1,
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project30, ask, {
+    chapterIds: ["ch30"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 3, "第 1 个被拒，应保留 3 个事件");
+  assert.equal(result.storyEvents.edges.length, 1, "原始序号 2→3 的关系必须建立");
+  const byTitle = new Map(result.storyEvents.nodes.map((n) => [n.title, n.id]));
+  const edge = result.storyEvents.edges[0];
+  assert.equal(edge.source, byTitle.get("乙拾起钥匙"), "source 必须是乙拾钥匙");
+  assert.equal(edge.target, byTitle.get("丙打开门"), "target 必须是丙开门");
+});
+
+test("G1 关系引用被拒事件时报无效端点，不得移接到其他事件", async () => {
+  const p = withContent();
+  const content = "乙拾起钥匙。丙打开门。";
+  const ch31 = { id: "ch31", number: 31, title: "无效端点", summary: "", content };
+  const project31 = { ...p, chapters: [...p.chapters, ch31] };
+  const sp = (quote) => {
+    const start = content.indexOf(quote);
+    return { start, end: start + quote.length, quote };
+  };
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "被拒事件",
+          summary: "",
+          kind: "action",
+          actors: ["甲"],
+          objects: ["无"],
+          basis: "narration",
+          quote: "不存在的原文",
+        },
+        {
+          title: "乙拾起钥匙",
+          summary: "",
+          kind: "action",
+          actors: ["乙"],
+          objects: ["钥匙"],
+          basis: "narration",
+          ...sp("乙拾起钥匙。"),
+        },
+      ],
+      relations: [
+        {
+          sourceId: 1,
+          targetId: 2,
+          type: "causal",
+          basis: "explicit",
+          explanation: "引用被拒事件",
+          evidenceSourceId: 2,
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project31, ask, {
+    chapterIds: ["ch31"],
+  });
+  assert.equal(result.storyEvents.edges.length, 0, "引用被拒事件的关系不得建立");
+  assert.ok(
+    result.failures.some((f) => f.includes("relations[0]")),
+    "必须报告无效端点，实际：" + JSON.stringify(result.failures),
+  );
+});
+
+// ===== G3：重复引文必须保留模型已核验的区间 =====
+
+test("G3 重复引文时保留模型给出的第二处区间", async () => {
+  const p = withContent();
+  const content = "甲敲门。乙开窗。甲敲门。";
+  const ch32 = { id: "ch32", number: 32, title: "重复引文", summary: "", content };
+  const project32 = { ...p, chapters: [...p.chapters, ch32] };
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "甲第二次敲门",
+          summary: "",
+          kind: "action",
+          actors: ["甲"],
+          objects: ["门"],
+          basis: "narration",
+          start: 8,
+          end: 12,
+          quote: "甲敲门。",
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project32, ask, {
+    chapterIds: ["ch32"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 1);
+  assert.equal(
+    result.storyEvents.nodes[0].evidence.start,
+    8,
+    "必须保留模型核验过的第二处区间，而不是 indexOf 的首处",
+  );
+});
+
+test("G3 无区间且引文重复时报告歧义，不静默选第一处", async () => {
+  const p = withContent();
+  const content = "甲敲门。乙开窗。甲敲门。";
+  const ch33 = { id: "ch33", number: 33, title: "歧义", summary: "", content };
+  const project33 = { ...p, chapters: [...p.chapters, ch33] };
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "甲敲门",
+          summary: "",
+          kind: "action",
+          actors: ["甲"],
+          objects: ["门"],
+          basis: "narration",
+          quote: "甲敲门。",
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project33, ask, {
+    chapterIds: ["ch33"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 0, "歧义引文不得静默取第一处");
+  assert.ok(
+    result.failures.some((f) => f.includes("歧义") || f.includes("多处")),
+    "必须报告歧义，实际：" + JSON.stringify(result.failures),
+  );
+});
+
+// ===== G6：同 storyTime 的互斥数量必须报 =====
+
+test("G6 同一 storyTime 的互斥数量必须形成待核对项", () => {
+  const p = withContent();
+  const content = "此时桌上还剩十个苹果。此时桌上只剩九个苹果。";
+  const ch34 = { id: "ch34", number: 34, title: "同时点", summary: "", content };
+  const project34 = { ...p, chapters: [...p.chapters, ch34] };
+  const a = content.indexOf("此时桌上还剩十个苹果");
+  const b = content.indexOf("此时桌上只剩九个苹果");
+  const built = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      draftNode(ch34, {
+        title: "此时还剩十个",
+        start: a,
+        end: a + "此时桌上还剩十个苹果".length,
+        quote: "此时桌上还剩十个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+        storyTime: "同一时刻",
+      }),
+      draftNode(ch34, {
+        title: "此时只剩九个",
+        start: b,
+        end: b + "此时桌上只剩九个苹果".length,
+        quote: "此时桌上只剩九个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+        storyTime: "同一时刻",
+      }),
+    ],
+    { chapters: project34.chapters },
+  ).storyEvents;
+  assert.equal(built.nodes.length, 2, "前置：两个节点都应建立");
+  const checked = checkStoryEvents(project34, built);
+  assert.equal(
+    checked.issues.filter((i) => i.kind === "state-break").length,
+    1,
+    "同一 storyTime 的互斥数量必须报冲突",
   );
 });

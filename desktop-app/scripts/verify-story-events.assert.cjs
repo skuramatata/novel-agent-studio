@@ -80,6 +80,27 @@ function createRunner({ plan = [] } = {}) {
   };
 
   const runCase = async (caseId, fn) => {
+    // 未注册的 case 不得中断整个脚本：记录为 fail 并继续，
+    // 保证后续案例仍会执行（否则"未执行"会被误当成环境问题）。
+    if (!results.has(caseId)) {
+      results.set(caseId, {
+        caseId,
+        title: caseId,
+        rNumbers: [],
+        blockedBy: null,
+        status: RESULT_FAIL,
+        assertions: [
+          {
+            description: `案例 ${caseId} 未在 CASE_PLAN 注册，无法执行`,
+            ok: false,
+            evidence: null,
+          },
+        ],
+        detail: `案例 ${caseId} 未在 CASE_PLAN 注册`,
+        evidence: null,
+      });
+      return results.get(caseId);
+    }
     const entry = entryOf(caseId);
     try {
       await fn();
@@ -106,6 +127,16 @@ function createRunner({ plan = [] } = {}) {
 
   const list = () => [...results.values()].map((e) => ({ ...e, assertions: [...e.assertions] }));
 
+  // 可控失败注入：直接改内部状态（list() 返回副本，改副本无效）。
+  const injectFailure = (caseId, reason) => {
+    const entry = results.get(caseId);
+    if (!entry) return false;
+    entry.status = RESULT_FAIL;
+    entry.detail = reason;
+    entry.assertions.push({ description: reason, ok: false, evidence: { injected: true } });
+    return true;
+  };
+
   // 自检 A：任何既不是 pass 也不是 fail 的案例都要在此暴露。
   const auditUnresolved = () => {
     const unresolved = list().filter((e) => e.status !== RESULT_PASS && e.status !== RESULT_FAIL);
@@ -125,7 +156,7 @@ function createRunner({ plan = [] } = {}) {
     };
   };
 
-  return { check, fail, finish, runCase, list, auditUnresolved, summary };
+  return { check, fail, finish, runCase, list, auditUnresolved, summary, injectFailure };
 }
 
 module.exports = { createRunner, RESULT_PASS, RESULT_FAIL, REQUIRED_FIELDS };

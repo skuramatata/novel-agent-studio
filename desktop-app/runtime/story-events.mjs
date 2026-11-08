@@ -170,6 +170,9 @@ function matchScore(node, draft) {
   return score;
 }
 
+// 这些事件类型里参与者顺序承载方向语义（谁交给谁），集合相同不等于同一件事。
+const S_DIRECTIONAL_KINDS = new Set(["handover", "state-transfer"]);
+
 // 区间重叠只说明"位置接近"，不能证明是同一事件：同一句原文里可以抽出多件事。
 // 因此先做语义判据，再看得分：标题毫无共词时，必须 kind 相同且共享同一实体，
 // 才可能是同一事件的改写；否则一律按另一件事新建节点，保留各自身份与连线。
@@ -190,8 +193,24 @@ function sameEvent(node, draft, score) {
   const nodeActors = [...node.actors].sort().join("|");
   const draftActors = [...draft.actors].sort().join("|");
   const sameActors = nodeActors === draftActors;
-  // 实体完全一致（同 actor 集合且同 object 集合）且引文逐字相同，才视为重抽同一条。
-  return sameObjects && sameActors && node.evidence.quote === draft.evidence.quote;
+  if (!sameObjects || !sameActors) return false;
+  // 实体与引文完全相同仍不足以判同一：同一句里的往返交接
+  // （"甲把钥匙交给乙，乙检查后又把钥匙还给甲。"）actors/objects 集合一致、
+  // 共用整句引文，却是方向相反的两件事。
+  // 因此再看「指向」：交接/转移类事件里参与者顺序包含方向信息。
+  // 集合相同但顺序不同 → 方向不同 → 是两个事件，保留各自身份。
+  if (S_DIRECTIONAL_KINDS.has(draft.kind)) {
+    const nodeOrder = node.actors.join(">");
+    const draftOrder = draft.actors.join(">");
+    if (nodeOrder !== draftOrder) return false;
+  }
+  // 标题里明确的施受方向词也作为区分证据（交给 / 还给 …）。
+  const directionWord = (title) =>
+    ["还给", "还给", "交还", "归还", "取回", "收回", "交回"].find((w) =>
+      title.includes(w),
+    ) ?? "";
+  if (directionWord(node.title) !== directionWord(draft.title)) return false;
+  return node.evidence.quote === draft.evidence.quote;
 }
 
 function detectCoverageStatus(value) {

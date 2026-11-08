@@ -87,6 +87,27 @@ function locate(partText, quote, partStart) {
   return { start: partStart + start, end: partStart + start + quote.length };
 }
 
+// 无区间时的定位：引文在本片必须唯一出现。
+// 重复出现说明模型没给区间、程序无法判断指的是哪一处，此时报歧义，
+// 不能静默选第一处（那会把第二次事件标到第一次的位置上）。
+function locateUnique(partText, quote, partStart, failures, context) {
+  if (!quote) return null;
+  const first = partText.indexOf(quote);
+  if (first < 0) return null;
+  const second = partText.indexOf(quote, first + 1);
+  if (second >= 0) {
+    failures.push(
+      `第${context.chapter.number}章第${context.part + 1}片 events[${context.event}] 引文「${quote}」` +
+        `在本片出现多处（${first}、${second}…），缺少 start/end 无法唯一定位，属歧义，已拒绝该事件。`,
+    );
+    return null;
+  }
+  return {
+    start: partStart + first,
+    end: partStart + first + quote.length,
+  };
+}
+
 
 const HISTORY_LIMIT = 12;
 const HISTORY_QUOTE = 240;
@@ -151,8 +172,15 @@ function historyPayloadFor(graph, chapter, partText, partIndex) {
 // 把模型给的端点解析成持久化 ID：临时序号 → 本片新事件；ref → 已存在正式事件。
 function resolveEndpoint(raw, idKey, refKey, localIds, created, graph, chapter) {
   if (Number.isInteger(raw?.[idKey])) {
+    if (!localIds.has(raw[idKey]))
+      return { error: "临时序号不在本片事件范围内" };
     const index = localIds.get(raw[idKey]);
-    if (index === undefined) return { error: "临时序号不在本片事件范围内" };
+    // null 表示该原始序号的事件已被拒绝（引文不匹配等），必须明确报错，
+    // 不能跳过或顺移到下一个事件，否则关系会连到错误的事件上。
+    if (index === null)
+      return {
+        error: `临时序号 ${raw[idKey]} 对应的事件已被拒绝（出处无效），无法作为关系端点`,
+      };
     const node = created[index];
     if (!node) return { error: "临时序号未对应到已建立事件" };
     return { id: node.id };
@@ -230,12 +258,20 @@ export async function extractStoryEvents(
           const span = hasSpan
             ? { start: part.start + event.start, end: part.start + event.end }
             : null;
-          const located = locate(
-            part.text,
-            event.quote || ref?.text || "",
-            part.start,
-          );
+          const quote = event.quote || ref?.text || "";
+          // G3：模型给了区间时，区间是"已核验的位置"，必须优先采用。
+          // indexOf 只会返回首次匹配；正文里重复出现同一句时（如两次"甲敲门。"），
+          // 用首处会把第二次事件错标到第一次的位置。
+          const located = hasSpan
+            ? { start: span.start, end: span.end }
+            : locateUnique(part.text, quote, part.start, failures, {
+                chapter,
+                part: index,
+                event: i,
+              });
           if (!located) {
+            // 占用该原始序号但标记为无效，供 relations 解析时明确报错。
+            localIds.set(i + 1, null);
             failures.push(
               `第${chapter.number}章第${index + 1}片 events[${i}].quote 不在原文中`,
             );
@@ -244,6 +280,7 @@ export async function extractStoryEvents(
           if (hasSpan) {
             const slice = chapter.content.slice(span.start, span.end);
             if (slice !== event.quote) {
+              localIds.set(i + 1, null);
               failures.push(
                 `第${chapter.number}章第${index + 1}片 events[${i}] 区间与引文不符：` +
                   `start=${event.start}/end=${event.end} 处原文是「${slice}」，` +
@@ -276,12 +313,14 @@ export async function extractStoryEvents(
             storyTime: event.storyTime ?? "",
             evidence,
           });
-          // F4：事件临时编号与原文片段 sourceId 是两套编号，必须分开。
-          // ① event.sourceId 只指向本片 sources[]（上面已用于定位原文）；
-          // ② 事件临时编号恒为本片输出顺序 1..n，供 relations 的 sourceId/targetId 引用；
-          // ③ 持久化 ID 由 mergeStoryEvents 用 storyEventId 生成。
-          // 若把 ① 当 ② 用，两个事件引用同一 sourceId 时后者会覆盖前者，关系端点丢失。
-          localIds.set(nodeDrafts.length, nodeDrafts.length - 1);
+          // F4/G1：事件临时编号与原文片段 sourceId 是两套编号，必须分开。
+          // ① event.sourceId 只指向本片 sources[]（用于定位原文）；
+          // ② 事件临时编号 = 模型本次输出的原始序号（第 i 个事件即 i+1），
+          //    与"是否被接受"无关；③ 持久化 ID 由 mergeStoryEvents 生成。
+          // 关键：编号不能按 nodeDrafts.length 递增。若第 1 个事件被拒后重新编号，
+          // 关系 2→3 会连到丙开门→丁离开（错移一位）。这里用 events 的下标，
+          // 被拒事件显式记为 null，关系引用它时报无效端点，绝不静移接。
+          localIds.set(i + 1, nodeDrafts.length - 1);
         }
         const merged = mergeStoryEvents(graph, nodeDrafts, {
           chapters: p.chapters,
@@ -492,12 +531,24 @@ export function checkStoryEvents(project, graph, { knowledgeClaims = [] } = {}) 
     const text = `${node.title}${node.summary}${node.evidence.quote}`;
     return [...text.matchAll(QUANTITY)].map((m) => m[0]);
   };
-  // 判断"数量变化是否被解释"，不能只看整段文本里有没有过程动词——
-  // 那会把"同句提到吃"当成解释了任意物件的数量差。这里要求：
-  // 后一条在同一章的叙述位置上晚于前一条，且后一条自身写出了过程动词，
-  // 并且能读出"从旧量到新量"的两个数量。满足才算有承接解释。
-  const PROCESS =
-    /(吃|喝|用|消耗|分|送|交|取|拿走|丢掉|扔|剥|卖出|买入|添加|添|增|减|剩|余|留|变为|变成|降|升)/;
+  const chaptersById = new Map(
+    (project.chapters || []).filter(Boolean).map((c) => [c.id, c]),
+  );
+  // 判断"数量变化是否被解释"：必须有可核的过程，而不是"出现过某个字"。
+  // G6：「剩」「余」这类是"剩余状态"的描述，本身不解释数量为何变化——
+  // 「此时桌上还剩十个」与「此时桌上只剩九个」在同一时刻并存，是矛盾而非推进。
+  // 因此把它们从"过程动词"里移出，只保留真正表示动作/转移的词；
+  // 数量变化仍要由前一条（旧量）与后一条（新量）在同章的叙述先后上承接。
+  // 真动作（真正改变数量的动作）。
+  const PROCESS_ACTION =
+    /(吃|喝|用|消耗|分|送|交|取|拿走|丢掉|扔|剥|卖出|买入|添加|添|增加|减少|变为|变成)/;
+  // 剩余量/结果态表述：单独出现只说"现在是多少"，不解释变化（G6）。
+  const LEFTOVER = /(剩|余|还留|留下)/;
+  // 判定"这条陈述是不是在讲变化结果"：必须同时具备
+  // ① 结果态用词（剩/余/…）——说明它承接了某个动作；
+  // ② 该结果与旧量不同。
+  // 只写"某某说十个/九个"这类并存断言不算，即便上下文出现过动作词。
+  const statesResult = (text) => LEFTOVER.test(text);
   // F11：数量可能只写在逐字证据里（模型不该被迫把数字重复进标题），
   // 因此判断"新旧量"时必须读证据，与 numbersOf 的读取范围保持一致。
   const countText = (node) =>
@@ -512,18 +563,52 @@ export function checkStoryEvents(project, graph, { knowledgeClaims = [] } = {}) 
     if (after.evidence.end <= before.evidence.start) return false;
     return before.narrativeOffset < after.narrativeOffset;
   };
+  // 变化过程可能写在两条事件之前或之间（"席间他吃了苹果。开席时十个苹果，
+  // 散席时剩九个。"里动作在旧量之前）。取同章上下文：从 after 所在段落的
+  // 段首（或 before 起点前一句）到 after 结束，覆盖"动作→旧量→新量"整段。
+  const contextText = (before, after) => {
+    const content = chaptersById.get(after.chapterId)?.content ?? "";
+    if (!content) return "";
+    const from = Math.max(0, Math.min(before.evidence.start, after.evidence.start));
+    // 向前扩到所在句子起点，避免把"他吃了"切在句子中间。
+    // 向前扩一句：变化动作常写在旧量所在句的上一句
+    // （"席间他吃了苹果。开席时十个苹果，…"），只退到本句首会漏掉它。
+    const prevBreak = Math.max(
+      content.lastIndexOf("。", from - 1),
+      content.lastIndexOf(String.fromCharCode(10), from - 1),
+    );
+    const extraBreak =
+      prevBreak > 0
+        ? Math.max(
+            content.lastIndexOf("。", prevBreak - 1),
+            content.lastIndexOf(String.fromCharCode(10), prevBreak - 1),
+          )
+        : -1;
+    const sentenceStart = Math.max(extraBreak + 1, 0);
+    return content.slice(Math.min(sentenceStart, from), Math.max(before.evidence.end, after.evidence.end));
+  };
   const explainsTransition = (before, after) => {
     if (!precedes(before, after)) return false;
-    const text = `${after.title}${after.summary}${after.evidence.quote}`;
-    if (!PROCESS.test(text)) return false;
+    const own = `${after.title}${after.summary}${after.evidence.quote}`;
+    const context = `${own}${contextText(before, after)}`;
     const oldCount = countText(before);
     const newCount = countText(after);
-    if (!oldCount || !newCount) return false;
-    return oldCount !== newCount;
+    if (!oldCount || !newCount || oldCount === newCount) return false;
+    // ① 后一条自身陈述的是"变化后的结果量"（剩/余…）——它承接了动作；
+    //    或 ② 后一条自身含动作词。
+    // 两者都不满足时（如"老周说九个"这种并存断言），即便上下文出现过动作词，
+    // 也不能算解释了数量差——那是同刻两个互斥陈述，必须进待核对项。
+    if (statesResult(own) || PROCESS_ACTION.test(own)) return true;
+    // 后一条只是静态陈述，但上下文确实写了动作且它紧接旧量之后：
+    // 仍要求后一条带结果态语义，否则不豁免。
+    return statesResult(context) && PROCESS_ACTION.test(context) && statesResult(own);
   };
-  // 同一时点：同章即视为可能并存的两个数量陈述；
-  // 跨章按时间推进处理，不判互斥。
+  // 同一时点：同章即视为可能并存；跨章按时间推进处理，不判互斥。
+  // 两条都写了相同 storyTime（如"同一时刻"）时，更是明确的"同时并存"，
+  // 此时即便出现过程动词也不能当作推进——这是对明确故事时间的尊重。
   const sameTimePoint = (a, b) => a.chapterId === b.chapterId;
+  const explicitSameTime = (a, b) =>
+    Boolean(a.storyTime) && a.storyTime === b.storyTime;
   for (const [object, nodes] of byObject) {
     const conflicts = [];
     for (let i = 0; i < nodes.length; i += 1) {
@@ -542,9 +627,12 @@ export function checkStoryEvents(project, graph, { knowledgeClaims = [] } = {}) 
         // 这是正常的状态推进，不报互斥；只有同一时点并存两个互斥数量陈述才报。
         if (!sameTimePoint(nodes[i], nodes[j])) continue;
         // 有承接解释（旧量 → 新量）就算正常推进，不报互斥。
+        // 明确同一 storyTime 时不允许用"过程动词"豁免：同刻并存的两个数量
+        // 就是互相矛盾，必须进入待核对项（不关闭检查）。
         const explained =
-          explainsTransition(nodes[i], nodes[j]) ||
-          explainsTransition(nodes[j], nodes[i]);
+          !explicitSameTime(nodes[i], nodes[j]) &&
+          (explainsTransition(nodes[i], nodes[j]) ||
+            explainsTransition(nodes[j], nodes[i]));
         if (explained) continue;
         conflicts.push([nodes[i], nodes[j]]);
       }
