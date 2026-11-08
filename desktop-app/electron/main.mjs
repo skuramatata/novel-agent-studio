@@ -56,11 +56,11 @@ import {
 import { runAgent } from "../runtime/agent.mjs";
 import { applyProposal, projectSchema } from "../runtime/schema.mjs";
 import { resolveProposalStoryEvents } from "../runtime/story-events-apply.mjs";
-import { extractStoryEvents } from "../runtime/story-event-agent.mjs";
 import {
   previewStoryEvents,
   resolveStoryEventAsk,
   resolveStoryProvider,
+  runStoryBuild,
   storyBuildStatus,
 } from "./story-build-channel.mjs";
 import { resolveModelTransport } from "./model-transport.mjs";
@@ -604,82 +604,33 @@ async function modelTransport() {
 // R7/F1：对已采纳正文建立/补全派生事件图。只写 storyEvents，绝不改正文。
 // 模型通道由主进程按当前供应商配置自行构造；IPC 不传函数，
 // 因此真实桌面按钮可用，而不是只有注入 ask 的测试路径能用。
+// H6：空目标（全部有正文章节已抽取）由 runStoryBuild 提前返回，
+// 不构造模型通道、不写作品、不递增 revision。
 handle("story-build", (projectId, options) =>
   serial(async () => {
-    if (typeof projectId !== "string") throw Error("缺少作品标识");
-    // 执行入口必须由界面显式声明模式；只读状态查询请走 story-build-status。
-    if (options?.mode !== "build" && options?.mode !== "complete")
-      throw Error(
-        "建立事件图需要显式模式（build 或 complete）。只查看进度请调用只读状态接口。",
-      );
-    const p = await store.load(projectId);
-    const hasContent = (p.chapters || []).some((c) => c.content.trim());
-    if (!hasContent) throw Error("作品还没有已采纳正文，无法建立事件图。");
-    // 目标章：显式 chapterIds 优先；mode=complete 时只补未完成的章，不重做已抽取章。
-    const coverage = new Map(
-      (p.storyEvents?.coverage || []).map((e) => [e.chapterId, e.status]),
-    );
-    let chapterIds = Array.isArray(options?.chapters)
-      ? options.chapters
-      : undefined;
-    if (!chapterIds && options?.mode === "complete")
-      chapterIds = (p.chapters || [])
-        .filter((c) => c.content.trim())
-        .filter((c) => coverage.get(c.id) !== "extracted")
-        .map((c) => c.id);
-    const manuscript = JSON.stringify(
-      (p.chapters || []).map((c) => [c.id, c.content]),
-    );
-    // 供应商：显式字符串参数优先，否则自动选已配置的那个；参数必须可序列化。
-    const { provider, config } = resolveStoryProvider(
-      await loadConfig(),
-      typeof options?.provider === "string" ? options.provider : undefined,
-    );
-    // 注入只用于主进程内部验收，正常桌面路径不会带；两者走同一个业务入口。
-    const { ask, source } = resolveStoryEventAsk({
-      injected: typeof options?.ask === "function" ? options.ask : undefined,
-      config,
-      signal: undefined,
-      callComplete: async (cfg, messages, signal, fetcher, tokens) =>
-        complete(cfg, messages, signal, await modelTransport(), tokens),
+    const result = await runStoryBuild({
+      projectId,
+      options,
+      store,
+      resolveAsk: async () => {
+        // 供应商：显式字符串参数优先，否则自动选已配置的那个；参数必须可序列化。
+        const { provider, config } = resolveStoryProvider(
+          await loadConfig(),
+          typeof options?.provider === "string" ? options.provider : undefined,
+        );
+        // 注入只用于主进程内部验收，正常桌面路径不会带；两者走同一个业务入口。
+        const { ask, source } = resolveStoryEventAsk({
+          injected:
+            typeof options?.ask === "function" ? options.ask : undefined,
+          config,
+          signal: undefined,
+          callComplete: async (cfg, messages, signal, fetcher, tokens) =>
+            complete(cfg, messages, signal, await modelTransport(), tokens),
+        });
+        return { ask, source, provider, model: config.model || "" };
+      },
     });
-    const result = await extractStoryEvents(p, ask, {
-      chapterIds,
-      model:
-        typeof options?.model === "string"
-          ? options.model
-          : config.model || "",
-      maxChars: Number.isInteger(options?.maxChars) ? options.maxChars : 4000,
-    });
-    if (
-      JSON.stringify((p.chapters || []).map((c) => [c.id, c.content])) !==
-      manuscript
-    )
-      throw Error("内部错误：建立事件图不应改动正文。");
-    // 作者已有的处理决定不能被重跑抹掉。
-    const decided = new Map(
-      (p.storyEvents?.issues || [])
-        .filter((i) => i.disposition && i.disposition !== "open")
-        .map((i) => [i.id, i.disposition]),
-    );
-    const storyEvents = {
-      ...result.storyEvents,
-      issues: (result.storyEvents.issues || []).map((issue) =>
-        decided.has(issue.id)
-          ? { ...issue, disposition: decided.get(issue.id) }
-          : issue,
-      ),
-    };
-    const saved = await store.save(
-      { ...p, storyEvents, projectId },
-      p.revision,
-    );
-    return {
-      ...storyBuildStatus(saved, options),
-      provider,
-      channel: source,
-      failures: result.failures || [],
-    };
+    return result;
   }),
 );
 handle("settings", async () => publicConfigs(await loadConfig()));

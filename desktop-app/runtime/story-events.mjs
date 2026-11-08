@@ -152,15 +152,19 @@ function overlaps(a, b) {
   return a.start < b.end && b.start < a.end;
 }
 
-// 同章重抽的匹配：区间重叠是硬条件，标题/实体相似度决定是否同一事件；
-// 区间完全不重叠时只允许逐字引文相同，避免把相邻事件并成一条。
+// 跨批次（历史节点 vs 新草稿）的匹配：同章且区间重叠或完全相同是硬条件。
+// 只共享同一句引文不再构成匹配证据——同一句原文里可以抽出多件事，
+// 且同一句在正文别处重复出现时也不能因此并成一条。
 function matchScore(node, draft) {
   if (node.chapterId !== draft.chapterId) return 0;
-  const sameQuote = node.evidence.quote === draft.evidence.quote;
-  if (!sameQuote && !overlaps(node.evidence, draft.evidence)) return 0;
-  let score = 0;
-  if (sameQuote) score += 3;
-  if (overlaps(node.evidence, draft.evidence)) score += 1;
+  if (!overlaps(node.evidence, draft.evidence)) return 0;
+  let score = 1;
+  if (
+    node.evidence.start === draft.evidence.start &&
+    node.evidence.end === draft.evidence.end
+  )
+    score += 2;
+  if (node.evidence.quote === draft.evidence.quote) score += 1;
   score += textScore(node.title, draft.title);
   if (textScore(node.summary, draft.summary) > 0) score += 1;
   const sharedActors = draft.actors.filter((a) => node.actors.includes(a)).length;
@@ -170,11 +174,11 @@ function matchScore(node, draft) {
   return score;
 }
 
-// 这些事件类型里参与者顺序承载方向语义（谁交给谁），集合相同不等于同一件事。
-const S_DIRECTIONAL_KINDS = new Set(["handover", "state-transfer"]);
+// 集合比较：参与者与物件只比较集合，不比较列举顺序（顺序不承载身份语义）。
+const setKey = (values) => [...new Set(values)].sort().join("|");
 
 // 区间重叠只说明"位置接近"，不能证明是同一事件：同一句原文里可以抽出多件事。
-// 因此先做语义判据，再看得分：标题毫无共词时，必须 kind 相同且共享同一实体，
+// 因此先做语义判据，再看得分：标题毫无共词时，必须 kind 相同且实体集合相同，
 // 才可能是同一事件的改写；否则一律按另一件事新建节点，保留各自身份与连线。
 function sameEvent(node, draft, score) {
   if (score < 2) return false;
@@ -183,34 +187,25 @@ function sameEvent(node, draft, score) {
   // 共词很多，却是两次不同交接，必须保留各自身份。
   const titleScore = textScore(node.title, draft.title);
   if (titleScore >= 2) return true;
-  // 共享实体只是"可能相关"。要判同一事件，必须在动作语义上也一致：
-  // kind 相同、对象集合相同、参与者也相同。
-  // 注意：不能因为"分数高"就放行——同句两次交接的分数同样很高。
   if (node.kind !== draft.kind) return false;
-  const nodeObjects = [...node.objects].sort().join("|");
-  const draftObjects = [...draft.objects].sort().join("|");
-  const sameObjects = nodeObjects === draftObjects;
-  const nodeActors = [...node.actors].sort().join("|");
-  const draftActors = [...draft.actors].sort().join("|");
-  const sameActors = nodeActors === draftActors;
-  if (!sameObjects || !sameActors) return false;
-  // 实体与引文完全相同仍不足以判同一：同一句里的往返交接
-  // （"甲把钥匙交给乙，乙检查后又把钥匙还给甲。"）actors/objects 集合一致、
-  // 共用整句引文，却是方向相反的两件事。
-  // 因此再看「指向」：交接/转移类事件里参与者顺序包含方向信息。
-  // 集合相同但顺序不同 → 方向不同 → 是两个事件，保留各自身份。
-  if (S_DIRECTIONAL_KINDS.has(draft.kind)) {
-    const nodeOrder = node.actors.join(">");
-    const draftOrder = draft.actors.join(">");
-    if (nodeOrder !== draftOrder) return false;
-  }
-  // 标题里明确的施受方向词也作为区分证据（交给 / 还给 …）。
-  const directionWord = (title) =>
-    ["还给", "还给", "交还", "归还", "取回", "收回", "交回"].find((w) =>
-      title.includes(w),
-    ) ?? "";
-  if (directionWord(node.title) !== directionWord(draft.title)) return false;
-  return node.evidence.quote === draft.evidence.quote;
+  return (
+    setKey(node.objects) === setKey(draft.objects) &&
+    setKey(node.actors) === setKey(draft.actors)
+  );
+}
+
+// 同一批次内的两条草稿只有在标题、类型、区间、参与者集合、物件集合
+// 全部相同时才算重复条目；否则各自建节点，避免同句多件事被并成一条。
+function duplicateDraft(node, draft) {
+  return (
+    node.chapterId === draft.chapterId &&
+    node.title === draft.title &&
+    node.kind === draft.kind &&
+    node.evidence.start === draft.evidence.start &&
+    node.evidence.end === draft.evidence.end &&
+    setKey(node.actors) === setKey(draft.actors) &&
+    setKey(node.objects) === setKey(draft.objects)
+  );
 }
 
 function detectCoverageStatus(value) {
@@ -523,11 +518,19 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
   );
   const chapterById = chapterMap(chapters);
   const nodes = current.nodes.map((n) => ({ ...n }));
+  // 跨批次匹配只能命中合并前已存在的节点：本批新建的节点不参与匹配，
+  // 否则同批两条不同草稿会被后一条"重抽"进前一条，丢掉其中一个身份。
+  const historyNodes = [...nodes];
   const issues = [...current.issues];
   const counts = { added: 0, merged: 0, updated: 0, stale: 0 };
+  // 与输入 drafts 一一对应的落点：被拒为 null，新建/复用为节点 id。
+  const draftIds = [];
+  // 本批已落点的节点 id：同批重复判定只在这些节点里找，不碰历史节点。
+  const batchNodeIds = [];
   for (const raw of nodeDrafts) {
     const source = chapterById.get(raw.chapterId);
     if (!source) {
+      draftIds.push(null);
       issues.push(
         issueFor("missing-source", `事件所属章节 ${raw.chapterId} 不在当前作品中。`, {
           suggestion: "确认章节 id 后重新提交。",
@@ -537,6 +540,7 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
     }
     const evidence = normalizeEvidence(raw.evidence, chapters, raw.chapterId);
     if (!evidence) {
+      draftIds.push(null);
       issues.push(
         issueFor(
           "missing-source",
@@ -549,15 +553,21 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
     const draft = { ...nodeDraft(raw), evidence };
     let best = null;
     let bestScore = 0;
-    for (const node of nodes) {
+    for (const node of historyNodes) {
       const score = matchScore(node, draft);
       if (score > bestScore && sameEvent(node, draft, score)) {
         best = node;
         bestScore = score;
       }
     }
-    if (best) {
-      Object.assign(best, {
+    // 同批重复条目：只有与本批已落点草稿完全同形时才复用该草稿的节点。
+    const twin = [...batchNodeIds]
+      .reverse()
+      .map((id) => nodes.find((n) => n.id === id))
+      .find((node) => node && duplicateDraft(node, draft));
+    if (best ?? twin) {
+      const target = best ?? twin;
+      Object.assign(target, {
         chapterNumber: source.number,
         chapterTitle: source.title,
         storyTime: draft.storyTime,
@@ -573,6 +583,8 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
         stale: null,
       });
       counts.merged += 1;
+      draftIds.push(target.id);
+      if (!batchNodeIds.includes(target.id)) batchNodeIds.push(target.id);
       continue;
     }
     const candidate = storyNodeSchema.parse({
@@ -593,6 +605,8 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
     }
     nodes.push(candidate);
     counts.added += 1;
+    draftIds.push(candidate.id);
+    batchNodeIds.push(candidate.id);
   }
   const edges = current.edges.map((e) => ({ ...e }));
   for (const raw of options.edges || []) {
@@ -683,7 +697,9 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
     storyEvents = impact.storyEvents;
     counts.stale = impact.staleNodeIds.length + impact.staleEdgeIds.length;
   }
-  return { storyEvents, counts };
+  // draftIds 与输入 drafts 一一对应（拒绝为 null）。调用方据此解析关系端点，
+  // 不需要再按标题 + 区间回查——合并会覆盖 title，回查会指向错误事件。
+  return { storyEvents, counts, draftIds };
 }
 
 // 改稿失效传播：只标记与报告，不删除事件、不改正文、不自动补写前情。

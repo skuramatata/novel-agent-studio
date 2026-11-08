@@ -2,6 +2,9 @@
 // 任务书规定不得用"条件不满足就跳过"掩盖问题，本文件是脚本自身的守卫。
 const RESULT_PASS = "pass";
 const RESULT_FAIL = "fail";
+// 未验证：前置依赖缺失（如生成不出候选）导致该案例无法执行。
+// 与 fail 区分开——既不能算通过，也不该记成"脚本或产品断言失败"。
+const RESULT_UNVERIFIED = "unverified";
 
 const REQUIRED_FIELDS = ["caseId", "title", "rNumbers", "blockedBy"];
 
@@ -66,6 +69,11 @@ function createRunner({ plan = [] } = {}) {
   // 正常收尾：只有全部断言为真才算 pass；没有断言也判 fail（空跑不算通过）。
   const finish = (caseId, evidence = null) => {
     const entry = entryOf(caseId);
+    // 已显式判定为 unverified 的案例，finish 不得把它改写成 pass/fail。
+    if (entry.status === RESULT_UNVERIFIED) {
+      if (evidence !== null) entry.evidence = evidence;
+      return entry;
+    }
     if (entry.assertions.length === 0) {
       entry.status = RESULT_FAIL;
       entry.detail = "该案例未产生任何断言，空跑不算通过";
@@ -113,8 +121,11 @@ function createRunner({ plan = [] } = {}) {
         evidence: null,
       });
     } finally {
-      // 无论成功失败都走一次 finish，保证状态不是 not-run / in-progress。
-      if (entry.status !== RESULT_PASS) {
+      // 无论成功失败都走一次收尾，保证状态不是 not-run / in-progress。
+      // 但 unverified 是显式结论（前置缺失），不能被这里的兜底改写成 fail。
+      if (entry.status === RESULT_UNVERIFIED) {
+        // 保留原判定与原因。
+      } else if (entry.status !== RESULT_PASS) {
         if (entry.assertions.length === 0 && entry.status !== RESULT_FAIL) {
           entry.status = RESULT_FAIL;
           entry.detail = "案例未产生断言即结束";
@@ -137,9 +148,23 @@ function createRunner({ plan = [] } = {}) {
     return true;
   };
 
-  // 自检 A：任何既不是 pass 也不是 fail 的案例都要在此暴露。
+  // 前置缺失：明确标 unverified，并写明阻塞原因，附带已有证据进报告。
+  const unverified = (caseId, reason, evidence = null) => {
+    const entry = entryOf(caseId);
+    entry.status = RESULT_UNVERIFIED;
+    entry.detail = reason;
+    entry.evidence = evidence;
+    return entry;
+  };
+
+  // 自检 A：任何既不是 pass / fail / unverified 的案例都要在此暴露。
   const auditUnresolved = () => {
-    const unresolved = list().filter((e) => e.status !== RESULT_PASS && e.status !== RESULT_FAIL);
+    const unresolved = list().filter(
+      (e) =>
+        e.status !== RESULT_PASS &&
+        e.status !== RESULT_FAIL &&
+        e.status !== RESULT_UNVERIFIED,
+    );
     return {
       ok: unresolved.length === 0,
       unresolved: unresolved.map((e) => ({ caseId: e.caseId, status: e.status, title: e.title })),
@@ -152,11 +177,33 @@ function createRunner({ plan = [] } = {}) {
       total: all.length,
       pass: all.filter((e) => e.status === RESULT_PASS).length,
       fail: all.filter((e) => e.status === RESULT_FAIL).length,
-      unresolved: all.filter((e) => e.status !== RESULT_PASS && e.status !== RESULT_FAIL).length,
+      unverified: all.filter((e) => e.status === RESULT_UNVERIFIED).length,
+      unresolved: all.filter(
+        (e) =>
+          e.status !== RESULT_PASS &&
+          e.status !== RESULT_FAIL &&
+          e.status !== RESULT_UNVERIFIED,
+      ).length,
     };
   };
 
-  return { check, fail, finish, runCase, list, auditUnresolved, summary, injectFailure };
+  return {
+    check,
+    fail,
+    unverified,
+    finish,
+    runCase,
+    list,
+    auditUnresolved,
+    summary,
+    injectFailure,
+  };
 }
 
-module.exports = { createRunner, RESULT_PASS, RESULT_FAIL, REQUIRED_FIELDS };
+module.exports = {
+  createRunner,
+  RESULT_PASS,
+  RESULT_FAIL,
+  RESULT_UNVERIFIED,
+  REQUIRED_FIELDS,
+};

@@ -39,6 +39,21 @@
 
 同一事件再次抽取时按 `chapterId` 与区间重叠匹配复用原 id（`mergeStoryEvents`），不静默新建重复节点。旧作品没有 `storyEvents` 字段按空图处理，`projectSchema` 中该字段可选。
 
+### 事件身份的最小匹配规则
+
+身份判定不追求通用语义识别，只认下面四条：
+
+- **区间是硬条件**：跨批次复用既有节点，必须先有区间重叠。仅引文相同、位置不同不算同一事件，正文「甲敲门。乙开窗。甲敲门。」里的两次敲门各自成节点。
+- **集合比较，不看列举顺序**：`actors` 与 `objects` 用去重排序后的集合比较（`setKey`）。同一次「甲把钥匙交给乙」重抽为「乙接过甲递来的钥匙」、`actors` 从 `['甲','乙']` 变成 `['乙','甲']`，仍是同一 id。`actors` 只是参与者数组，**不承载施事/受事方向**，也不靠「还给/交还/归还」这类方向词表区分事件。
+- **同批全等才算重复**：同一批次内只有标题、区间、`actors`、`objects` 全等才判为重复草稿并跳过；同句内两个有证据支持的不同事件（如「甲把钥匙交给乙，乙看过后把钥匙递给甲」）不会被实体或引文相同而覆盖。
+- **端点靠 `draftIds`，不靠回查**：`mergeStoryEvents` 返回与输入草稿一一对应的 `draftIds`（被拒的为 `null`）。关系端点直接取 `draftIds[原始序号]`，不再按标题+区间反查——反查正是此前「同句往返只剩后一个节点、关系报端点无效」的来源。
+
+## 出处定位与报因
+
+模型给的 `sourceId` 是可信作用域：存在合法 `sourceId` 时，`locateUnique`（`runtime/story-event-agent.mjs`）只在该 source 对应的 offset 范围内定位与核验引文，不拿到整个分片里去找。显式 span 逐字核验通过就保留模型给的区间，不再被 `indexOf` 首处覆盖。
+
+失败原因分开报，不互相矛盾：「未找到」与「有多个匹配、缺少 span 无法唯一定位」是两种结论，不会同时输出「引文不在原文中」和「歧义」。只有可靠信息仍不能唯一确定时才报歧义；错误引文与错误 span 一律拒绝。
+
 ## 证据与失效传播
 
 出处一律由程序按区间从当前正文回填 `sourceHash` 与 `quote`（`eventEvidence`），模型只给区间与引文，不能自造哈希。模型若提交伪造的 `sourceHash` 会被覆盖；引文不在正文中则拒绝入库。
@@ -82,21 +97,39 @@
 
 对已采纳正文建立或补全派生事件图，入口是 `studio:story-build`。建图只写 `storyEvents`，写前比对章节正文，变化即拒绝；`mode=complete` 只补未抽取或未完成的章，不重做已抽取章；重试不会清空已成功结果，作者已作出的 disposition 按 issueId 原样回写。执行入口要求显式 `mode`（`build`/`complete`），否则报错提示改用只读接口。未来章纲与未采纳候选不进入正式历史。
 
+空补全不写版本。`electron/story-build-channel.mjs` 把「算目标」与「跑建图」拆成两个函数：`planStoryBuild` 是纯函数，只根据覆盖记录算待补章；`runStoryBuild` 在待补目标为空时直接返回 `skipped: true, skippedReason: "no-targets"`，**不调模型、不写作品、不动 revision**。前端 `primaryBuildMode` 相应增加 `"none"`，`StoryEvents.tsx` 在没有待补章节时不渲染可执行按钮，避免点出一个必然空跑的动作。`electron/main.mjs` 改走 `runStoryBuild`，空目标不再是「跑一遍再写一版」。
+
 查询进度与"能否建图"走 `studio:story-build-status`：它只读作品、不调用模型、不写盘，与执行入口返回同一套进度结构，界面可复用同一套渲染。
 
 建图的模型通道由主进程按当前供应商配置自行构造，**不要求调用方经 IPC 注入函数**——Electron IPC 本身无法传函数，若把它当作产品前提，真实桌面的按钮将永远不可用。未配置供应商或 API Key 时报可读错误。验收需要在主进程模型接缝注入替身时，用 `NOVEL_E2E_MODEL_STUB` 指向替身文件；该变量**仅在非打包环境生效**，打包产物完全忽略它，加载失败直接抛错而不回落真实网络。
 
 ## 验证
 
-自动化测试 405 项通过（存量 312 未降）。其中 `tests/story-events.test.mjs` 30 项覆盖稳定 id、改名重排、多前因多分支、无效边拒绝、失效传播、覆盖记录、项目往返、R4 精确证据、R5 同段多事件、R6 改稿保留原点、R3 四操作不删边、knownNodeIds 三条与 disposition 安全化；`tests/story-event-workflow.test.mjs` 34 项覆盖逐章抽取、上下文装配与预算截断、候选隔离、增量与完整图两种采纳形态、真实入口的无来源知情、R2 跨章端点与请求携带历史事件、R10 数量语义正负例，以及 renderer 依赖链不含 `node:crypto`。
+自动化测试 438 项通过，0 fail / 0 skip / 0 cancelled（第三轮 412，存量未降）。其中 `tests/story-events.test.mjs` 42 项覆盖稳定 id、改名重排、多前因多分支、无效边拒绝、失效传播、覆盖记录、项目往返、R4 精确证据、R5 同段多事件、R6 改稿保留原点、R3 四操作不删边、knownNodeIds 三条与 disposition 安全化，并含本轮 H1 三反例（同句往返保留两节点与关系、重抽 actors 顺序变化复用 id、同文本两处各自成节点）；`tests/story-event-workflow.test.mjs` 50 项覆盖逐章抽取、上下文装配与预算截断、候选隔离、增量与完整图两种采纳形态、真实入口的无来源知情、R2 跨章端点与请求携带历史事件、R10 数量语义正负例、H3 sourceId 作用域定位与报因区分、H4/H5 同时点与结果态判据，以及 renderer 依赖链不含 `node:crypto`；`tests/story-build-channel.test.mjs` 24 项覆盖建图通道契约与 H6 空目标不写版本。
 
-`scripts/verify-story-events.cjs` 通过真实 Electron IPC 驱动隔离作品，覆盖任务书十个回归案例、两个附加案例与两条真实产品链路的 26 个案例步骤，`status: passed`、26/26、`pageErrors: []`、`fixtureEvidenceAudit.ok: true`、`restartVerified: true`。任一必需案例失败或未执行时进程退出码非零（已用注入必失败断言验证过）。脚本拆为主入口、`verify-story-events.fixtures.cjs`（隔离夹具、请求记录器、偏移自检）与 `verify-story-events.assert.cjs`（断言运行器，拒绝空跑与恒真）三部分。请求记录器实测捕获到 case-02 的抽取请求携带第一章事件 id 与原文（`hasHistoricalEventIds: true`）。重启验证在同一数据目录关窗重开，比对节点、边与 disposition 全量一致。报告与 11 张截图在 `verification/story-event-chain/`。
+`scripts/verify-story-events.cjs` 通过真实 Electron IPC 驱动隔离作品，覆盖任务书十个回归案例、两个附加案例与两条真实产品链路的 28 个案例步骤。任一必需案例失败或未执行时进程退出码非零；启动失败与其他未捕获异常同样非零退出并保留原因（`finally` 只设 `process.exitCode`，不再抢先 `process.exit`）。脚本拆为主入口、`verify-story-events.fixtures.cjs`（隔离夹具、请求记录器、偏移自检）与 `verify-story-events.assert.cjs`（断言运行器，拒绝空跑与恒真）三部分。每次运行有唯一 `RUN_ID`，报告写进 `runs/<runId>/`，不会误读上一次的成功报告。故障注入有两个入口：`NOVEL_E2E_INJECT_LAUNCH_FAILURE=1` 让首次 Electron launch 故意失败，`NOVEL_E2E_INJECT_FAILURE=<caseId>` 让指定案例强制断言失败，两者都必须得到非零退出。
+
+两条链路的验收方式：建图点**真实按钮**而非直调 `window.studio.storyBuild`，并在**同一会话**校验当前画布与共享 revision；候选断言**绑定本次生成的候选 ID**，核对具体节点、边、问题与证据内容，而不是只看字段存在或正式图有边；等待用 `pollUntil` / `waitOrchestrationIdle` 直到明确终态，不用固定延时、也不以「等失败提示超时」猜成功；**禁止**手写 pending 或 helper 替代真实失败入口。前置条件缺失致使某案例无法真实执行时，`verify-story-events.assert.cjs` 显式标 `unverified` 并写入阻塞原因，该结论不会被兜底逻辑改写成 pass 或 fail，整体状态为 `incomplete`——`incomplete` 不是通过。请求记录器实测捕获到 case-02 的抽取请求携带第一章事件 id 与原文（`hasHistoricalEventIds: true`）。重启验证在同一数据目录关窗重开，比对节点、边与 disposition 全量一致。报告与 11 张截图在 `verification/story-event-chain/`。
+
+本轮最终报告为 `status: incomplete`、`pass=25 fail=0 unverified=3`（`chain1-accept`、`chain2-revise`、`chain2-accept-restart`），阻塞原因是章节页的候选死锁：`src/features/ChapterGeneration.tsx:39` 用 `!!pending` 禁用生成按钮，而 `:19-21` 只在该章正文有差异时渲染「采纳/放弃」入口，于是「无改动候选」在章节页没有处理途径。该缺陷在产品侧，不在验收脚本；脚本按设计拒绝绕过。
 
 state-break 只保留客观判据：同一物件的两条事件都给出数量词且数量不同才报告。早期实现用"标题不同 + 都是 state-change"判定互斥，会把正常叙事里的两次状态变化误报成矛盾，已删除该判据并补负向用例。代价是没有数量词的状态矛盾（如门开与门关）不再被规则层捕捉，交由专项审稿与作者判断，遵循宁可少报不可乱报。
 
+### 同一时点的判据
+
+数量矛盾是否成立，取决于两条事件是否真的发生在同一时点。判据分三层：
+
+- **任意非空相同字符串不等于同时点**。两条事件 `storyTime` 都是「未知」「不详」「待定」这类未知值（`UNKNOWN_TIME`），不构成同时点——「桌上有十个苹果。他吃了一个，剩下九个。」不会因为两边都写「未知」就报矛盾。
+- **宽泛时段不构成同时点**。「午饭时」这类时段内可以发生连续动作，同样不报。
+- **只有原文明确写明并存线索才算同时点**（`SIMULTANEOUS_TIME`：同一时刻 / 同时 / 与此同时 / 同一瞬间 / 此刻同时），此时同刻互斥数量必须形成待核对项。
+
+### 结果态不等于过程动作
+
+「剩」「只剩」是结果态，不能单独用来豁免数量矛盾。豁免必须由真实过程动作提供（`PROCESS_ACTION`）：「舱里有十个苹果。舱里剩九个苹果。」会报 pending 问题；「舱里有十个苹果。他吃了一个，舱里剩九个苹果。」才豁免。此前 `statesResult(own)` 单独成立即可豁免，导致「同一时刻还剩十个 / 同一时刻只剩九个」这种原文已明确同刻、却没有消费或转移过程的场景被静默放过。
+
 真实作品《那个不曾存在的岛》10 章仅作只读观察，取证记录在 `verification/story-event-chain/研究记录.md`，含第四章回忆指向第二章放信号枪、罐头数量链条、怀表状态冲突等原文与偏移。
 
-**验证边界**：第一阶段的模型响应全部来自注入的 `ask` 桩，`requests` 记录证明的是"请求确实携带了历史事件 id 与原文"，不等于真实 GLM/MiniMax 理解并使用了这些材料；本阶段未调用任何真实供应商。回归案例在 `mkdtemp` 隔离作品库中运行，正式十章作品未建图（刻意只读保护）。改稿（revise）路径未单独做端到端案例；`knowledgeClaimsFrom` 为动词白名单启发式，存在漏报可能；state-break 只认"同一物件 + 双方都有数量词 + 数量不同"，无数量词的状态矛盾交专项审稿。深色主题与色弱对比度未做正式测量，仅以形状、线型与文字保证不只靠颜色表意。测试通过不等于事件抽取完整或全书没有逻辑漏洞。
+**验证边界**：模型响应全部来自注入的桩（`NOVEL_E2E_MODEL_STUB`），`requests` 记录证明的是"请求确实携带了历史事件 id 与原文"，不等于真实 GLM/MiniMax 理解并使用了这些材料；本阶段未调用任何真实供应商。回归案例在 `mkdtemp` 隔离作品库中运行，正式十章作品未建图（刻意只读保护）。本轮端到端状态为 `incomplete`（`chain1-accept`、`chain2-revise`、`chain2-accept-restart` 三项阻塞于章节页候选死锁，见「验证」节），第一阶段未通过验收。`knowledgeClaimsFrom` 为动词白名单启发式，存在漏报可能；state-break 只认"同一物件 + 双方都有数量词 + 数量不同"，无数量词的状态矛盾交专项审稿。`runtime/providers.mjs` 的 `fetcher` 与 `runtime/provider-stream.mjs` 的 `reader.read()` 仍是无上限等待，本轮在 `runtime/structured-step.mjs`（30 分钟）与 `runtime/chapter-agent.mjs`（检索 120 秒）加了保护，但底层 embedding 偶发不返回的机制与供应商无响应的成因均未验证，**不**声称已修复现场卡死根因。深色主题与色弱对比度未做正式测量，仅以形状、线型与文字保证不只靠颜色表意。测试通过不等于事件抽取完整或全书没有逻辑漏洞。
 
 ## 交付
 

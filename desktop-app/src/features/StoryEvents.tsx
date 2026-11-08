@@ -49,6 +49,7 @@ import {
   STORY_DECISION_ACTIONS,
   canRebuild,
   canStartStoryBuild,
+  hasStoryBuildTargets,
   issueNeedsDecision,
   primaryBuildLabel,
   primaryBuildMode,
@@ -1043,24 +1044,41 @@ export function StoryEvents() {
           )}
         </div>
         <div className="sev-build-actions">
-          {/* G5 主操作：未建图→建立（重建全部目标章）；已建图→补全（只补未完成章） */}
-          <button
-            className="primary sev-build-btn"
-            disabled={!canStartStoryBuild(build) || build?.state === "running"}
-            title={
-              build && !build.enabled
-                ? "该功能需要桌面端支持"
-                : build && !build.hasContent
-                  ? "作品还没有正文"
-                  : primaryBuildMode(build) === "build"
-                    ? "对已采纳正文建立事件图（会重建目标章）"
-                    : "只补未完成的章节，已完成章节不会被重做"
-            }
-            onClick={() => void startBuild(primaryBuildMode(build))}
-          >
-            <Sparkles size={14} />
-            {primaryBuildLabel(build)}
-          </button>
+          {/* G5 主操作：未建图→建立（重建全部目标章）；已建图→补全（只补未完成章）。
+              H6：全部章节已抽取时没有可执行动作，只说明原因；「重新建立」仍然保留。
+              环境不支持/没有正文时按钮照旧显示但禁用，沿用原有说明。 */}
+          {(!canStartStoryBuild(build) || hasStoryBuildTargets(build)) && (
+            <button
+              className="primary sev-build-btn"
+              disabled={!canStartStoryBuild(build) || build?.state === "running"}
+              title={
+                build && !build.enabled
+                  ? "该功能需要桌面端支持"
+                  : build && !build.hasContent
+                    ? "作品还没有正文"
+                    : primaryBuildMode(build) === "build"
+                      ? "对已采纳正文建立事件图（会重建目标章）"
+                      : primaryBuildMode(build) === "none"
+                        ? "全部章节已抽取，没有需要补全的内容"
+                        : "只补未完成的章节，已完成章节不会被重做"
+              }
+              onClick={() => {
+                const mode = primaryBuildMode(build);
+                if (mode === "none") return;
+                void startBuild(mode);
+              }}
+            >
+              <Sparkles size={14} />
+              {primaryBuildLabel(build)}
+            </button>
+          )}
+          {build?.enabled &&
+            build.hasContent &&
+            !hasStoryBuildTargets(build) && (
+              <span className="small muted" role="status">
+                全部章节已抽取，没有需要补全的内容
+              </span>
+            )}
           {/* G5 独立动作：强制重建全部目标章，仅在已建过图时出现 */}
           {canRebuild(build) && (
             <button

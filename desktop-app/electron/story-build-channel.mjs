@@ -1,4 +1,5 @@
 import { complete } from "../runtime/providers.mjs";
+import { extractStoryEvents } from "../runtime/story-event-agent.mjs";
 import { parseStructured } from "../runtime/structured.mjs";
 import { emptyStoryEvents, mergeStoryEvents } from "../runtime/story-events.mjs";
 
@@ -91,6 +92,7 @@ export function storyBuildStatus(project, options = {}) {
       chapterId: c.id,
       chapterNumber: c.number,
       chapterTitle: c.title,
+      hasContent: Boolean(c.content.trim()),
       status: coverage?.status ?? "pending",
       parts: coverage?.parts || [],
       eventCount,
@@ -111,6 +113,11 @@ export function storyBuildStatus(project, options = {}) {
       : counts.extracted === counts.total
         ? "complete"
         : "partial";
+  // H6：补全的目标章 = 有正文但尚未抽取完成。没有正文的章不可能被抽取，
+  // 因此不计入待补，否则「全部有正文章节已抽取」永远会被判成还有活可干。
+  const pendingTargetIds = chapters
+    .filter((c) => c.hasContent && c.status !== "extracted")
+    .map((c) => c.chapterId);
   return {
     enabled: true,
     state,
@@ -118,8 +125,122 @@ export function storyBuildStatus(project, options = {}) {
     hasContent,
     chapters,
     counts,
+    // H6：界面据此决定是否提供可执行的补全动作；既有字段语义不变。
+    pendingTargets: pendingTargetIds.length,
+    hasPendingTargets: pendingTargetIds.length > 0,
     failure: chapters.find((c) => c.failure)?.failure ?? null,
     touchesManuscript: false,
+  };
+}
+
+// H6：把「这次要抽取哪些章」单独算清，只读、纯函数。
+// mode=build 覆盖全部有正文的章；mode=complete 只补未完成章，
+// 显式 chapterIds 优先（仍限定在有正文的章内，避免对空章发抽取请求）。
+export function planStoryBuild(project, options = {}) {
+  const chapters = (project.chapters || []).filter((c) => c.content.trim());
+  const explicit = Array.isArray(options?.chapters)
+    ? options.chapters
+    : undefined;
+  if (explicit) {
+    const wanted = chapters
+      .filter((c) => explicit.includes(c.id))
+      .sort((a, b) => a.number - b.number)
+      .map((c) => c.id);
+    return { mode: "explicit", chapterIds: wanted, empty: wanted.length === 0 };
+  }
+  const mode = options?.mode === "complete" ? "complete" : "build";
+  if (mode === "build") {
+    const all = chapters.sort((a, b) => a.number - b.number).map((c) => c.id);
+    return { mode, chapterIds: all, empty: all.length === 0 };
+  }
+  const coverage = new Map(
+    (project.storyEvents?.coverage || []).map((e) => [e.chapterId, e.status]),
+  );
+  const missing = chapters
+    .filter((c) => coverage.get(c.id) !== "extracted")
+    .sort((a, b) => a.number - b.number)
+    .map((c) => c.id);
+  return { mode, chapterIds: missing, empty: missing.length === 0 };
+}
+
+// H6：story-build 的唯一执行入口。mode=complete 且筛选后没有目标章时，
+// 直接返回当前只读状态并标记 skipped —— 不调模型、不写作品、不动 revision。
+// resolveAsk 是懒工厂：只有确实存在目标章时才构造模型通道（读配置、解析供应商
+// 都在工厂里），因此空路径连供应商配置都不会被读取。
+export async function runStoryBuild({
+  projectId,
+  options,
+  store,
+  ask,
+  resolveAsk,
+  extract = extractStoryEvents,
+} = {}) {
+  if (typeof projectId !== "string") throw Error("缺少作品标识");
+  // 执行入口必须由界面显式声明模式；只读状态查询请走 story-build-status。
+  if (options?.mode !== "build" && options?.mode !== "complete")
+    throw Error(
+      "建立事件图需要显式模式（build 或 complete）。只查看进度请调用只读状态接口。",
+    );
+  const project = await store.load(projectId);
+  const hasContent = (project.chapters || []).some((c) => c.content.trim());
+  if (!hasContent) throw Error("作品还没有正文，无法建立事件图。");
+  const plan = planStoryBuild(project, options);
+  if (plan.empty) {
+    // 契约：返回值始终是扁平 StoryBuildProgress，H6 信息只作为新增字段并入，
+    // 既有调用方（界面 setBuild、验收脚本）读取 counts/chapters 不会变成 undefined。
+    return {
+      ...storyBuildStatus(project, options),
+      skipped: true,
+      skippedReason: "no-targets",
+      targetChapterIds: [],
+      failures: [],
+      provider: null,
+      channel: "none",
+    };
+  }
+  const resolved =
+    typeof ask === "function"
+      ? { ask, source: "injected", provider: null }
+      : await resolveAsk();
+  const manuscript = JSON.stringify(
+    (project.chapters || []).map((c) => [c.id, c.content]),
+  );
+  const result = await extract(project, resolved.ask, {
+    chapterIds: plan.chapterIds,
+    model: typeof options?.model === "string" ? options.model : "",
+    maxChars: Number.isInteger(options?.maxChars) ? options.maxChars : 4000,
+  });
+  if (
+    JSON.stringify((project.chapters || []).map((c) => [c.id, c.content])) !==
+    manuscript
+  )
+    throw Error("内部错误：建立事件图不应改动正文。");
+  // 作者已有的处理决定不能被重跑抹掉。
+  const decided = new Map(
+    (project.storyEvents?.issues || [])
+      .filter((i) => i.disposition && i.disposition !== "open")
+      .map((i) => [i.id, i.disposition]),
+  );
+  const storyEvents = {
+    ...result.storyEvents,
+    issues: (result.storyEvents.issues || []).map((issue) =>
+      decided.has(issue.id)
+        ? { ...issue, disposition: decided.get(issue.id) }
+        : issue,
+    ),
+  };
+  const saved = await store.save(
+    { ...project, storyEvents, projectId },
+    project.revision,
+  );
+  return {
+    ...storyBuildStatus(saved, options),
+    skipped: false,
+    skippedReason: null,
+    targetChapterIds: plan.chapterIds,
+    failures: result.failures || [],
+    provider: resolved.provider ?? null,
+    channel: resolved.source,
   };
 }
 

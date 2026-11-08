@@ -109,68 +109,75 @@ function buildByStage(sys, usr) {
   }
   // 事件抽取
   if (/抽取故事事件|story-events|events 最多/.test(sys)) {
-    const quote = firstSentence(usr);
-    void 0;
-    if (!quote) return { summary: "E2E 替身：无可用引文", events: [], relations: [] };
-    // 返回两条相关事件 + 一条显式关系：预览验收要求"跨章边"这个硬证据，
-    // 只有单事件时 edges 恒为 0（产品不会凭空生成关系）。
-    // 区间必须相对**当前分片的正文文本**（sources[].text），
-    // 而不是整个 JSON payload——否则 start/end 会错位。
+    // H7：抽取响应必须足以检验两件事——
+    //   ① 候选跨章边能指向正式图历史事件的**具体 id**；
+    //   ② 候选问题能真实产生并被持久化（不能只测"零问题正例"）。
+    // 因此按分片原文实际内容产出事件：先取两个同物件不同数量的陈述（形成 state-break
+    // 待核对项），再把首事件通过 historyEvents[0].id 接成跨章边。
     let partText = usr;
+    let historyEvents = [];
     try {
       const payload = JSON.parse(usr);
       const src = (payload.sources || [])[0];
       if (src && typeof src.text === "string") partText = src.text;
+      if (Array.isArray(payload.historyEvents)) historyEvents = payload.historyEvents;
     } catch {}
-    const afterFirst = partText.indexOf(quote) + quote.length;
-    const rest = partText.slice(afterFirst);
-    const secondRel = rest.search(/[\u4e00-\u9fa5][^。！？\n]{3,40}[。！？]/);
-    const second = secondRel >= 0
-      ? rest.slice(secondRel, secondRel + (rest.slice(secondRel).match(/^[^。！？\n]*[。！？]/) || [""])[0].length)
-      : "";
-    const secondStart = secondRel >= 0 ? afterFirst + secondRel : 0;
+    const pick = (regex) => {
+      const m = partText.match(regex);
+      return m ? { quote: m[0], start: m.index } : null;
+    };
+    // 数量陈述：同物件（铜钉）先后出现不同数量，且同章 → 互斥状态待核对项。
+    const qtyA = pick(/[^。！？\n]*?(?:十|10)[^。！？\n]*?铜钉[^。！？\n]*?。/);
+    const qtyB = pick(/[^。！？\n]*?(?:九|9)[^。！？\n]*?铜钉[^。！？\n]*?。/);
+    const fallback = pick(/[\u4e00-\u9fa5][^。！？\n]{4,40}[。！？]/);
+    const drafts = [];
+    const push = (hit, kind, objects) => {
+      if (!hit) return;
+      drafts.push({
+        title: hit.quote.slice(0, 16),
+        summary: "替身为验收生成的事件（引文逐字来自请求原文）",
+        kind,
+        actors: ["林遥"],
+        objects,
+        basis: "narration",
+        storyTime: "",
+        start: hit.start,
+        end: hit.start + hit.quote.length,
+        quote: hit.quote,
+      });
+    };
+    if (qtyA && qtyB && qtyA.start !== qtyB.start) {
+      push(qtyA, "state-change", ["铜钉"]);
+      push(qtyB, "state-change", ["铜钉"]);
+    } else {
+      push(fallback, "action", ["铜钥匙"]);
+    }
+    if (!drafts.length)
+      return { summary: "E2E 替身：无可用引文", events: [], relations: [] };
+    const relations = [];
+    if (drafts.length >= 2)
+      relations.push({
+        sourceId: 1,
+        targetId: 2,
+        type: "related",
+        basis: "inferred",
+        explanation: "同一木箱的前后两处数量陈述，是否同一时刻需作者核对。",
+        evidenceSourceId: 1,
+      });
+    // 跨章边：用正式图历史事件的稳定 id 作为 sourceRef，端点 id 会被断言逐字核对。
+    if (historyEvents[0])
+      relations.push({
+        sourceRef: historyEvents[0].id,
+        targetId: 1,
+        type: "causal",
+        basis: "explicit",
+        explanation: `本片首个事件接续第${historyEvents[0].chapterNumber ?? "?"}章已抽取事件「${historyEvents[0].title}」。`,
+        evidenceSourceId: 1,
+      });
     return {
-      summary: "E2E 替身：按契约返回两条可核事件与一条显式关系",
-      events: [
-        {
-          title: quote.slice(0, 16),
-          summary: "替身为验收生成的事件（引文逐字来自请求原文）",
-          kind: "action",
-          actors: [],
-          objects: ["铜扣"],
-          basis: "narration",
-          storyTime: "",
-          start: 0,
-          end: quote.length,
-          quote,
-        },
-        ...(second
-          ? [
-              {
-                title: second.slice(0, 16),
-                summary: "替身为验收生成的后续事件",
-                kind: "state-change",
-                actors: [],
-                objects: ["铜扣"],
-                basis: "narration",
-                storyTime: "",
-                start: secondStart,
-                end: secondStart + second.length,
-                quote: second,
-              },
-            ]
-          : []),
-      ],
-      relations: second ? [
-        {
-          sourceId: 1,
-          targetId: 2,
-          type: "causal",
-          basis: "explicit",
-          explanation: "前后事件由同一物件铜扣承接，前事为后事前提。",
-          evidenceSourceId: 1,
-        },
-      ] : [],
+      summary: "E2E 替身：按契约返回可核事件、跨章边与数量待核对项",
+      events: drafts,
+      relations,
     };
   }
   // 规划意图
@@ -258,11 +265,15 @@ export default async function fetchStub(url, init) {
     //（产品会拒绝 text.endsWith(next) 的"续写重复"）。
     const n = proseCounter;
     const uniq = `${process.hrtime.bigint()}-${n}`;
-    // 目标 1200 字（产品允许 700—1700）：每句 ~38 字 × 32 句 ≈ 1216。
-    const sentences = Array.from({ length: 32 }, (_, i) =>
+    // H7：首段必须包含同物件、不同数量、同章的两处陈述，
+    // 这样抽取阶段才能真实产出 state-break 待核对项（零问题样本不能替代问题持久化验收）。
+    // 两个数量陈述放在同一段且中间不换行，保证落在同一抽取分片内。
+    const quantityOpening = `舱底木箱里整齐码着十枚铜钉。半炷香后，木箱里整齐码着九枚铜钉。`;
+    // 目标 1200 字（产品允许 700—1700）：开场 ~30 字 + 每句 ~38 字 × 31 句 ≈ 1208。
+    const sentences = Array.from({ length: 31 }, (_, i) =>
       `轮${n}句${i + 1}号${uniq}：林遥把铜钥匙贴近灯下，划痕在光里忽深忽浅，潮气顺着舷窗渗进来。`,
     ).join("");
-    payload = `${sentences}\n收尾标记${uniq}〈场景完成〉`;
+    payload = `${quantityOpening}${sentences}\n收尾标记${uniq}〈场景完成〉`;
   }
 
   return new Response(

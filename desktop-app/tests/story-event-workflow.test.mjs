@@ -1686,3 +1686,292 @@ test("G6 同一 storyTime 的互斥数量必须形成待核对项", () => {
     "同一 storyTime 的互斥数量必须报冲突",
   );
 });
+
+// ---------------------------------------------------------------
+// H3：有合法 sourceId 时按其范围定位；未找到与多处匹配必须分开报因。
+// 归属：工部尚书 gongbu-shangshu。
+// ---------------------------------------------------------------
+
+test("H3-1 合法 sourceId 能消除跨片段的重复引文歧义", async () => {
+  const p = withContent();
+  // 两行分别切片：同一句「甲敲门。」在两片里都出现，只有 sourceId 能区分。
+  const content = "甲敲门。乙开窗。\n甲敲门。众人回头。";
+  const ch40 = { id: "ch40", number: 40, title: "重复敲门", summary: "", content };
+  const project40 = { ...p, chapters: [...p.chapters, ch40] };
+  const lineTwoStart = content.indexOf("甲敲门。众人回头。");
+  const ask = async (key, messages, validate) => {
+    const payload = JSON.parse(messages[1].content);
+    const picked = payload.sources.find((s) => s.text.includes("众人回头"));
+    assert.ok(picked, "前置：第二行必须是独立 source");
+    return validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "甲敲门",
+          summary: "",
+          kind: "action",
+          actors: ["甲"],
+          objects: ["门"],
+          basis: "narration",
+          sourceId: picked.sourceId,
+          quote: "甲敲门。",
+        },
+      ],
+    });
+  };
+  const result = await extractStoryEvents(project40, ask, {
+    chapterIds: ["ch40"],
+  });
+  assert.equal(
+    result.storyEvents.nodes.length,
+    1,
+    "有合法 sourceId 时应在该范围内唯一定位，实际 failures=" +
+      JSON.stringify(result.failures),
+  );
+  assert.equal(
+    result.storyEvents.nodes[0].evidence.start,
+    lineTwoStart,
+    "必须定位到 sourceId 所指那一片的引文位置，而不是首处",
+  );
+});
+
+test("H3-2 sourceId 范围内找不到引文时只报未找到，不报歧义", async () => {
+  const p = withContent();
+  const content = "甲敲门。乙开窗。\n甲敲门。众人回头。";
+  const ch41 = { id: "ch41", number: 41, title: "越界引文", summary: "", content };
+  const project41 = { ...p, chapters: [...p.chapters, ch41] };
+  const ask = async (key, messages, validate) => {
+    const payload = JSON.parse(messages[1].content);
+    const picked = payload.sources.find((s) => s.text.includes("众人回头"));
+    return validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "乙开窗",
+          summary: "",
+          kind: "action",
+          actors: ["乙"],
+          objects: ["窗"],
+          basis: "narration",
+          sourceId: picked.sourceId,
+          // 这句只存在于第一片，不在所引 sourceId 的范围内
+          quote: "乙开窗。",
+        },
+      ],
+    });
+  };
+  const result = await extractStoryEvents(project41, ask, {
+    chapterIds: ["ch41"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 0, "越出 sourceId 范围不得当成证据");
+  const joined = result.failures.join("\n");
+  assert.ok(joined.includes("未找到"), "必须报未找到，实际：" + joined);
+  assert.equal(
+    joined.includes("歧义") || joined.includes("多处"),
+    false,
+    "未找到与多处匹配必须分开报因，不得同时出现，实际：" + joined,
+  );
+});
+
+test("H3-3 无 sourceId 且引文重复时只报歧义，不追加「不在原文中」", async () => {
+  const p = withContent();
+  const content = "甲敲门。乙开窗。甲敲门。";
+  const ch42 = { id: "ch42", number: 42, title: "歧义报因", summary: "", content };
+  const project42 = { ...p, chapters: [...p.chapters, ch42] };
+  const ask = async (key, messages, validate) =>
+    validate({
+      summary: "本片摘要",
+      events: [
+        {
+          title: "甲敲门",
+          summary: "",
+          kind: "action",
+          actors: ["甲"],
+          objects: ["门"],
+          basis: "narration",
+          quote: "甲敲门。",
+        },
+      ],
+    });
+  const result = await extractStoryEvents(project42, ask, {
+    chapterIds: ["ch42"],
+  });
+  assert.equal(result.storyEvents.nodes.length, 0);
+  const joined = result.failures.join("\n");
+  assert.ok(
+    joined.includes("歧义") || joined.includes("多处"),
+    "必须报歧义，实际：" + joined,
+  );
+  assert.equal(
+    joined.includes("不在原文中") || joined.includes("未找到"),
+    false,
+    "引文确实在原文中，只是无法唯一定位，不得同时报互相矛盾的原因，实际：" + joined,
+  );
+});
+
+// ---------------------------------------------------------------
+// H4：相同未知时间/宽泛时段不等于同一瞬间。
+// ---------------------------------------------------------------
+
+test("H4 相同但非同时线索的 storyTime 不得阻止正常数量推进", () => {
+  const p = withContent();
+  const content = "桌上有十个苹果。他吃了一个，剩下九个。";
+  const ch43 = { id: "ch43", number: 43, title: "午饭", summary: "", content };
+  const project43 = { ...p, chapters: [...p.chapters, ch43] };
+  for (const storyTime of ["", "未知", "午饭时", "不详"]) {
+    const built = mergeStoryEvents(
+      emptyStoryEvents(),
+      [
+        draftNode(ch43, {
+          title: "桌上有十个苹果",
+          start: 0,
+          end: 7,
+          quote: "桌上有十个苹果",
+          objects: ["苹果"],
+          kind: "state-change",
+          storyTime,
+        }),
+        draftNode(ch43, {
+          title: "吃了一个剩九个",
+          start: 8,
+          end: 18,
+          quote: "他吃了一个，剩下九个",
+          objects: ["苹果"],
+          kind: "state-change",
+          storyTime,
+        }),
+      ],
+      { chapters: project43.chapters },
+    ).storyEvents;
+    assert.equal(built.nodes.length, 2, `前置（storyTime=${storyTime}）：两个节点都应建立`);
+    const checked = checkStoryEvents(project43, built);
+    assert.equal(
+      checked.issues.filter((i) => i.kind === "state-break").length,
+      0,
+      `storyTime=「${storyTime}」不是同一瞬间，数量推进不得报冲突`,
+    );
+  }
+});
+
+test("H4 明确同时线索时互斥数量仍必须形成待核对项", () => {
+  const p = withContent();
+  const content = "与此同时桌上还剩十个苹果。与此同时桌上只剩九个苹果。";
+  const ch44 = { id: "ch44", number: 44, title: "同时", summary: "", content };
+  const project44 = { ...p, chapters: [...p.chapters, ch44] };
+  const a = content.indexOf("与此同时桌上还剩十个苹果");
+  const b = content.indexOf("与此同时桌上只剩九个苹果");
+  const built = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      draftNode(ch44, {
+        title: "同时还剩十个",
+        start: a,
+        end: a + "与此同时桌上还剩十个苹果".length,
+        quote: "与此同时桌上还剩十个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+        storyTime: "与此同时",
+      }),
+      draftNode(ch44, {
+        title: "同时只剩九个",
+        start: b,
+        end: b + "与此同时桌上只剩九个苹果".length,
+        quote: "与此同时桌上只剩九个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+        storyTime: "与此同时",
+      }),
+    ],
+    { chapters: project44.chapters },
+  ).storyEvents;
+  assert.equal(built.nodes.length, 2, "前置：两个节点都应建立");
+  const checked = checkStoryEvents(project44, built);
+  assert.equal(
+    checked.issues.filter((i) => i.kind === "state-break").length,
+    1,
+    "明确同时并存的两个互斥数量必须报冲突，实际：" +
+      JSON.stringify(checked.issues.map((i) => [i.kind, i.explanation])),
+  );
+});
+
+// ---------------------------------------------------------------
+// H5：结果态（剩/余/还留/留下）单独出现不得豁免数量矛盾。
+// ---------------------------------------------------------------
+
+test("H5 只有结果态而没有真实过程的互斥数量必须报 state-break", () => {
+  const p = withContent();
+  const content = "桌上还剩十个苹果。桌上只剩九个苹果。";
+  const ch45 = { id: "ch45", number: 45, title: "只剩", summary: "", content };
+  const project45 = { ...p, chapters: [...p.chapters, ch45] };
+  const a = content.indexOf("桌上还剩十个苹果");
+  const b = content.indexOf("桌上只剩九个苹果");
+  const built = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      draftNode(ch45, {
+        title: "还剩十个",
+        start: a,
+        end: a + "桌上还剩十个苹果".length,
+        quote: "桌上还剩十个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+      }),
+      draftNode(ch45, {
+        title: "只剩九个",
+        start: b,
+        end: b + "桌上只剩九个苹果".length,
+        quote: "桌上只剩九个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+      }),
+    ],
+    { chapters: project45.chapters },
+  ).storyEvents;
+  assert.equal(built.nodes.length, 2, "前置：两个节点都应建立");
+  const checked = checkStoryEvents(project45, built);
+  assert.equal(
+    checked.issues.filter((i) => i.kind === "state-break").length,
+    1,
+    "「剩」只描述结果，不构成变化过程，必须报冲突，实际：" +
+      JSON.stringify(checked.issues.map((i) => [i.kind, i.explanation])),
+  );
+});
+
+test("H5 自身写出真实过程动作时仍按推进豁免", () => {
+  const p = withContent();
+  const content = "桌上有十个苹果。他吃掉一个，桌上九个苹果。";
+  const ch46 = { id: "ch46", number: 46, title: "吃掉", summary: "", content };
+  const project46 = { ...p, chapters: [...p.chapters, ch46] };
+  const a = content.indexOf("桌上有十个苹果");
+  const b = content.indexOf("他吃掉一个");
+  const built = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      draftNode(ch46, {
+        title: "桌上有十个苹果",
+        start: a,
+        end: a + "桌上有十个苹果".length,
+        quote: "桌上有十个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+      }),
+      draftNode(ch46, {
+        title: "吃掉一个桌上九个",
+        start: b,
+        end: content.length - 1,
+        quote: "他吃掉一个，桌上九个苹果",
+        objects: ["苹果"],
+        kind: "state-change",
+      }),
+    ],
+    { chapters: project46.chapters },
+  ).storyEvents;
+  assert.equal(built.nodes.length, 2);
+  const checked = checkStoryEvents(project46, built);
+  assert.equal(
+    checked.issues.filter((i) => i.kind === "state-break").length,
+    0,
+    "自身写明真实消耗动作的数量变化不是互斥，实际：" +
+      JSON.stringify(checked.issues.map((i) => [i.kind, i.explanation])),
+  );
+});

@@ -478,6 +478,15 @@ export interface StoryBuildProgress {
   failure: string | null;
   // 只更新派生事件数据、不改正文，界面必须原样转述这句。
   touchesManuscript: false;
+  // H6：本次执行/只读查询是否因没有目标章而短路。新增可选字段，既有字段语义不变。
+  skipped?: boolean;
+  skippedReason?: "no-targets" | null;
+  // 本次实际要抽取的章节；界面只读展示用。
+  targetChapterIds?: string[];
+  // 本次抽取过程中的失败原因；与 failure（上次落盘失败）不是同一含义。
+  failures?: string[];
+  provider?: string | null;
+  channel?: string;
 }
 // R9：作者对单个问题的处理决定。沿用 runtime 既有 disposition 枚举，不另造。
 export type StoryIssueDecision = Exclude<StoryIssueDisposition, "open">;

@@ -28,19 +28,45 @@ export function storyBuildLabel(progress: StoryBuildProgress | null): string {
 }
 
 // G5：主动作按钮的语义。未建图=建立；已部分/全部建图=补全（只补未完成章）。
+// H6：已建图但没有待补章节时返回 none —— 不能给出一个点了什么也不会发生的补全动作。
 // 「重新建立」是独立的强制重建动作，不能和补全共用一个按钮。
+// 待补章节数由主进程只读状态的 pendingTargets 给出；旧结构缺失时按 state 保守判定。
+function pendingTargetCount(progress: StoryBuildProgress): number | null {
+  const pending = (progress as StoryBuildProgress & { pendingTargets?: number })
+    .pendingTargets;
+  if (typeof pending === "number") return pending;
+  if (progress.state === "complete") return 0;
+  return null;
+}
+
+// H6：是否还有可补的章节。只回答"有没有待补目标"，
+// 环境是否支持、有没有正文由 canStartStoryBuild 判定，两者不能混用。
+// 未知时保持可执行，不能凭猜测禁用作者的动作。
+export function hasStoryBuildTargets(
+  progress: StoryBuildProgress | null,
+): boolean {
+  if (!progress) return true;
+  const pending = pendingTargetCount(progress);
+  return pending === null ? true : pending > 0;
+}
+
 export function primaryBuildMode(
   progress: StoryBuildProgress | null,
-): "build" | "complete" {
+): "build" | "complete" | "none" {
   if (!progress) return "build";
   const done =
     progress.counts.extracted + progress.counts.partial + progress.counts.failed;
-  return done === 0 ? "build" : "complete";
+  if (done === 0) return "build";
+  if (pendingTargetCount(progress) === 0) return "none";
+  return "complete";
 }
 
 // G5：主动作按钮文案，与 primaryBuildMode 严格一致。
 export function primaryBuildLabel(progress: StoryBuildProgress | null): string {
-  return primaryBuildMode(progress) === "build" ? "建立事件图" : "补全事件图";
+  const mode = primaryBuildMode(progress);
+  if (mode === "build") return "建立事件图";
+  if (mode === "complete") return "补全事件图";
+  return "全部章节已抽取";
 }
 
 // G5：只有已经建过图（有覆盖记录）才允许"重新建立"，避免无意义全量重跑。
@@ -53,14 +79,13 @@ export function canRebuild(
 }
 
 // R7：是否可以触发建图。未启用（浏览器预览）或没有正文时必须禁用。
+// H6：语义保持不变——能否建图只看环境与正文，不看补全是否有目标章。
 export function canStartStoryBuild(progress: StoryBuildProgress | null): boolean {
   if (!progress) return false;
   if (!progress.enabled) return false;
   if (!progress.hasContent) return false;
   return progress.state !== "running";
-}
-
-// R7：进度文案要能如实区分四种覆盖状态，不能把"没读"说成"没有"。
+}// R7：进度文案要能如实区分四种覆盖状态，不能把"没读"说成"没有"。
 export function storyBuildSummary(progress: StoryBuildProgress | null): string {
   if (!progress) return "尚未读取建图状态";
   if (progress.state === "unsupported")
@@ -414,8 +439,7 @@ export function useStoryEvents() {
 
   // R7：触发建图。失败不清空已有结果，也不重置作者决定（由主进程保证）。
   const startBuild = useCallback(
-    async (mode: "build" | "complete") => {
-      setBuildError("");
+    async (mode: "build" | "complete") => {      setBuildError("");
       try {
         const next = await bridge.storyBuild(project!.projectId, { mode });
         setBuild(next);

@@ -1945,3 +1945,153 @@ test("G2 真正同一事件重抽仍不重复，已有边不改指", () => {
   assert.equal(second.storyEvents.nodes.length, 1, "同一事件重抽不得新增节点");
   assert.equal(second.storyEvents.nodes[0].id, first.nodes[0].id);
 });
+
+// ---------------------------------------------------------------
+// H1：事件身份 —— 往返交接不合并、同一事件重抽不重复、
+// 同位置文本重复出现时两次事件不丢失。归属：工部尚书 gongbu-shangshu。
+// ---------------------------------------------------------------
+
+const h1Chapter = (id, content) => ({
+  id,
+  number: 1,
+  title: "H1",
+  summary: "",
+  content,
+});
+
+const h1Draft = (patch) => ({
+  chapterId: patch.chapterId,
+  title: patch.title,
+  summary: patch.summary ?? "",
+  kind: patch.kind ?? "handover",
+  actors: patch.actors ?? ["甲", "乙"],
+  objects: patch.objects ?? ["钥匙"],
+  basis: "narration",
+  storyTime: patch.storyTime ?? "",
+  evidence: patch.evidence,
+});
+
+test("H1-A 同句往返交接：同一批两个草稿不得合并，关系端点各自独立", () => {
+  const text = "甲把钥匙交给乙，乙看过后把钥匙递给甲。";
+  const ch = h1Chapter("ch-h1a", text);
+  // 两次交接共用整句引文，actors 列举顺序与 objects 完全相同（不得改成两段不重叠引文规避）。
+  const whole = { start: 0, end: text.length, quote: text };
+  const merged = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      h1Draft({ chapterId: "ch-h1a", title: "甲把钥匙交给乙", evidence: { ...whole } }),
+      h1Draft({ chapterId: "ch-h1a", title: "乙把钥匙递给甲", evidence: { ...whole } }),
+    ],
+    { chapters: [ch] },
+  );
+  assert.equal(
+    merged.storyEvents.nodes.length,
+    2,
+    "往返交接必须保留两个身份，实际：" +
+      JSON.stringify(merged.storyEvents.nodes.map((n) => n.title)),
+  );
+  assert.equal(
+    new Set(merged.storyEvents.nodes.map((n) => n.id)).size,
+    2,
+    "两个交接不得复用同一 ID",
+  );
+  assert.ok(Array.isArray(merged.draftIds), "mergeStoryEvents 必须返回 draftIds");
+  assert.equal(merged.draftIds.length, 2, "draftIds 必须与输入草稿一一对应");
+  assert.ok(merged.draftIds[0] && merged.draftIds[1], "两个已建立草稿都必须取回节点 id");
+  assert.notEqual(merged.draftIds[0], merged.draftIds[1], "两条关系的端点不得指向同一节点");
+  for (const id of merged.draftIds)
+    assert.ok(
+      merged.storyEvents.nodes.some((n) => n.id === id),
+      `draftIds 里的 ${id} 必须是本次图里的节点`,
+    );
+
+  const linked = mergeStoryEvents(merged.storyEvents, [], {
+    chapters: [ch],
+    edges: [
+      {
+        source: merged.draftIds[0],
+        target: merged.draftIds[1],
+        type: "state-transfer",
+        basis: "explicit",
+        explanation: "甲先交出，乙看过后递回",
+        evidence: [{ chapterId: "ch-h1a", ...whole }],
+      },
+    ],
+  }).storyEvents;
+  const cross = linked.edges.find(
+    (e) => e.source === merged.draftIds[0] && e.target === merged.draftIds[1],
+  );
+  assert.ok(cross, "往返关系必须建立且端点各自独立");
+});
+
+test("H1-B 同一事件重抽：actors 列举顺序变化仍复用同一事件 ID", () => {
+  const text = "甲把钥匙交给乙。";
+  const ch = h1Chapter("ch-h1b", text);
+  const whole = { start: 0, end: text.length, quote: text };
+  const first = mergeStoryEvents(
+    emptyStoryEvents(),
+    [
+      h1Draft({
+        chapterId: "ch-h1b",
+        title: "甲把钥匙交给乙",
+        actors: ["甲", "乙"],
+        evidence: { ...whole },
+      }),
+    ],
+    { chapters: [ch] },
+  ).storyEvents;
+  // 同一次交接被重抽成另一个说法，actors 顺序颠倒（不得据此判成两个事件）。
+  const again = mergeStoryEvents(
+    first,
+    [
+      h1Draft({
+        chapterId: "ch-h1b",
+        title: "乙接过甲递来的钥匙",
+        actors: ["乙", "甲"],
+        evidence: { ...whole },
+      }),
+    ],
+    { chapters: [ch] },
+  );
+  assert.equal(
+    again.storyEvents.nodes.length,
+    1,
+    "同一事件重抽不得新增节点，实际：" +
+      JSON.stringify(again.storyEvents.nodes.map((n) => n.title)),
+  );
+  assert.equal(again.counts.added, 0);
+  assert.equal(again.counts.merged, 1);
+  assert.equal(again.storyEvents.nodes[0].id, first.nodes[0].id, "事件身份必须保持不变");
+  assert.equal(again.draftIds.length, 1);
+  assert.equal(again.draftIds[0], first.nodes[0].id, "draftIds 必须指回复用的事件 id");
+});
+
+test("H1-C 同位置文本重复出现时，两次敲门必须保留为两个节点", () => {
+  const text = "甲敲门。乙开窗。甲敲门。";
+  const ch = h1Chapter("ch-h1c", text);
+  const make = (start) =>
+    h1Draft({
+      chapterId: "ch-h1c",
+      title: "甲敲门",
+      kind: "action",
+      actors: ["甲"],
+      objects: ["门"],
+      evidence: { start, end: start + 4, quote: "甲敲门。" },
+    });
+  const merged = mergeStoryEvents(emptyStoryEvents(), [make(0), make(8)], {
+    chapters: [ch],
+  });
+  assert.equal(
+    merged.storyEvents.nodes.length,
+    2,
+    "正文里两次敲门必须保留为两个节点，实际：" +
+      JSON.stringify(merged.storyEvents.nodes.map((n) => [n.title, n.evidence.start])),
+  );
+  assert.deepEqual(
+    merged.storyEvents.nodes.map((n) => n.evidence.start).sort((a, b) => a - b),
+    [0, 8],
+    "两处区间都必须保留",
+  );
+  assert.equal(merged.draftIds.length, 2);
+  assert.notEqual(merged.draftIds[0], merged.draftIds[1]);
+});

@@ -79,6 +79,33 @@ const scenesSchema = z.object({
 });
 const intentContract = workflowContract("task_intent", intentSchema);
 const scenesContract = workflowContract("scene_plan", scenesSchema);
+// 本地检索是纯本地计算，正常在秒级返回；无上限等待会让任务永久停在 running 且无错误。
+const RETRIEVAL_WAIT_MS = 120000;
+function waitLimited(run, { label, waitMs, signal }) {
+  let timer, onAbort;
+  const guarded = new Promise((resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          Object.assign(
+            Error(
+              `${label}等待${
+                waitMs >= 1000 ? Math.round(waitMs / 1000) + " 秒" : waitMs + " 毫秒"
+              }仍未返回，已按失败处理；疑似本地 embedding 未返回。`,
+            ),
+            { code: "RETRIEVAL_TIMEOUT" },
+          ),
+        ),
+      waitMs,
+    );
+    onAbort = () => reject(signal.reason ?? Error("任务已停止"));
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+  return Promise.race([run(), guarded]).finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
+  });
+}
 
 export async function runChapterAgent(
   p,
@@ -93,6 +120,11 @@ export async function runChapterAgent(
   // 已在执行的旧检查点保持原证据地址与恢复链；新任务启用连续性专项。
   const continuity = state.continuityVersion === 1;
   const extractionOptions = { continuity, compact: usesHighReasoning(config) };
+  // 仅用于回归测试注入更短上限；正常桌面路径使用 RETRIEVAL_WAIT_MS。
+  const retrievalWaitMs =
+    Number.isFinite(services.retrievalWaitMs) && services.retrievalWaitMs > 0
+      ? services.retrievalWaitMs
+      : RETRIEVAL_WAIT_MS;
   const save = async () => {
     state.updatedAt = new Date().toISOString();
     await checkpoint.write(state);
@@ -451,7 +483,15 @@ export async function runChapterAgent(
               .map((chapter) => chapter.id),
           },
         },
-        () => services.retrieval.sync(p, { signal, progress }),
+        () =>
+          waitLimited(
+            () => services.retrieval.sync(p, { signal, progress }),
+            {
+              label: "更新本地检索索引",
+              waitMs: retrievalWaitMs,
+              signal,
+            },
+          ),
         save,
       );
       state.retrievedContext = await traceOperation(
@@ -465,17 +505,27 @@ export async function runChapterAgent(
           },
         },
         () =>
-          services.retrieval.search(
-            p,
-            ch.number,
-            req.instruction + "\n" + ch.summary,
-            {
-              signal,
-              profile: budget,
-              maxTokens: Math.min(
-                6000,
-                Math.floor(inputLimit(budget, requestOutput(8000, budget)) / 3),
+          waitLimited(
+            () =>
+              services.retrieval.search(
+                p,
+                ch.number,
+                req.instruction + "\n" + ch.summary,
+                {
+                  signal,
+                  profile: budget,
+                  maxTokens: Math.min(
+                    6000,
+                    Math.floor(
+                      inputLimit(budget, requestOutput(8000, budget)) / 3,
+                    ),
+                  ),
+                },
               ),
+            {
+              label: "本地混合检索",
+              waitMs: retrievalWaitMs,
+              signal,
             },
           ),
         save,

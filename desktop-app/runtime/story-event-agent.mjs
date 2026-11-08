@@ -90,22 +90,33 @@ function locate(partText, quote, partStart) {
 // 无区间时的定位：引文在本片必须唯一出现。
 // 重复出现说明模型没给区间、程序无法判断指的是哪一处，此时报歧义，
 // 不能静默选第一处（那会把第二次事件标到第一次的位置上）。
-function locateUnique(partText, quote, partStart, failures, context) {
-  if (!quote) return null;
-  const first = partText.indexOf(quote);
-  if (first < 0) return null;
-  const second = partText.indexOf(quote, first + 1);
-  if (second >= 0) {
-    failures.push(
-      `第${context.chapter.number}章第${context.part + 1}片 events[${context.event}] 引文「${quote}」` +
-        `在本片出现多处（${first}、${second}…），缺少 start/end 无法唯一定位，属歧义，已拒绝该事件。`,
-    );
-    return null;
-  }
+// scope 给出时优先在该范围内定位：返回 { located } 或 { reason }，
+// reason 区分"未找到"与"多处匹配"，两者不得同时报。
+function locateUnique(partText, quote, partStart, scope = null) {
+  if (!quote) return { located: null, reason: "未找到" };
+  const base = scope ? scope.start : 0;
+  const haystack = scope ? scope.text : partText;
+  const first = haystack.indexOf(quote);
+  if (first < 0) return { located: null, reason: "未找到" };
+  const second = haystack.indexOf(quote, first + 1);
+  if (second >= 0)
+    return { located: null, reason: `多处匹配（${first}、${second}…）` };
   return {
-    start: partStart + first,
-    end: partStart + first + quote.length,
+    located: {
+      start: partStart + base + first,
+      end: partStart + base + first + quote.length,
+    },
+    reason: null,
   };
+}
+
+function locateFailure(context, quote, reason) {
+  return (
+    `第${context.chapter.number}章第${context.part + 1}片 events[${context.event}] 引文「${quote}」` +
+    (reason === "未找到"
+      ? "未找到：该引文不在指定范围内，已拒绝该事件。"
+      : `在本片${reason}，缺少 start/end 无法唯一定位，属歧义，已拒绝该事件。`)
+  );
 }
 
 
@@ -232,7 +243,7 @@ export async function extractStoryEvents(
                 chapter: chapter.number,
                 part: index + 1,
                 parts: parts.length,
-                sources,
+                sources: sources.map(({ sourceId, text }) => ({ sourceId, text })),
                 ...historyPayloadFor(graph, chapter, part.text, index),
               }),
             },
@@ -249,8 +260,6 @@ export async function extractStoryEvents(
             Number.isInteger(event.sourceId) && sources[event.sourceId - 1]
               ? sources[event.sourceId - 1]
               : null;
-          if (!ref && !Number.isInteger(event.start))
-            failures.push(`第${chapter.number}章第${index + 1}片 events[${i}] 未给出可定位的 sourceId 或区间`);
           // F3：区间只用来"核验"模型引文，不用来重新截取。
           // 区间与逐字引文不一致时必须拒绝并报因，不能按区间换一段文字当证据。
           const hasSpan =
@@ -259,21 +268,24 @@ export async function extractStoryEvents(
             ? { start: part.start + event.start, end: part.start + event.end }
             : null;
           const quote = event.quote || ref?.text || "";
-          // G3：模型给了区间时，区间是"已核验的位置"，必须优先采用。
-          // indexOf 只会返回首次匹配；正文里重复出现同一句时（如两次"甲敲门。"），
-          // 用首处会把第二次事件错标到第一次的位置。
-          const located = hasSpan
-            ? { start: span.start, end: span.end }
-            : locateUnique(part.text, quote, part.start, failures, {
-                chapter,
-                part: index,
-                event: i,
-              });
-          if (!located) {
+          // H3：模型给出合法 sourceId 时，只在该 source 的范围内定位核验；
+          // 越出该范围仍按"未找到"拒绝，不得放宽到整片。
+          const located = (() => {
+            // G3：模型给了区间时，区间是"已核验的位置"，必须优先采用。
+            // indexOf 只会返回首次匹配；正文里重复出现同一句时（如两次"甲敲门。"），
+            // 用首处会把第二次事件错标到第一次的位置。
+            if (hasSpan) return { located: { start: span.start, end: span.end }, reason: null };
+            const scope = ref ? { text: ref.text, start: ref.offset } : null;
+            const found = locateUnique(part.text, quote, part.start, scope);
+            return found;
+          })();
+          if (!located.located) {
             // 占用该原始序号但标记为无效，供 relations 解析时明确报错。
             localIds.set(i + 1, null);
+            // 未找到与多处匹配分开报因，且一次只报一个原因，
+            // 不追加"quote 不在原文中"这类与之矛盾的说明。
             failures.push(
-              `第${chapter.number}章第${index + 1}片 events[${i}].quote 不在原文中`,
+              locateFailure({ chapter, part: index, event: i }, quote, located.reason),
             );
             continue;
           }
@@ -289,18 +301,12 @@ export async function extractStoryEvents(
               continue;
             }
           }
-          if (!ref && !hasSpan && !located) {
-            failures.push(
-              `第${chapter.number}章第${index + 1}片 events[${i}] 未给出可定位的 sourceId 或区间`,
-            );
-            continue;
-          }
           // 证据区间取模型引文在原文中的真实位置，引文本身保持模型原样。
           const evidence = eventEvidence(
             chapter.id,
             chapter.content,
-            located.start,
-            located.end,
+            located.located.start,
+            located.located.end,
           );
           nodeDrafts.push({
             chapterId: chapter.id,
@@ -334,16 +340,10 @@ export async function extractStoryEvents(
           ],
         });
         graph = merged.storyEvents;
-        // localIds 记的是 nodeDrafts 的下标，created 必须与之一一对应地取回节点，
-        // 不能按引文再筛一遍（同引文合并、跨章事件都会让下标错位）。
-        const created = nodeDrafts.map((draft) =>
-          graph.nodes.find(
-            (n) =>
-              n.chapterId === draft.chapterId &&
-              n.evidence.start === draft.evidence.start &&
-              n.evidence.end === draft.evidence.end &&
-              n.title === draft.title,
-          ) ?? null,
+        // draftIds 与 nodeDrafts 一一对应；created[index] 直接取该草稿的落点。
+        // 不能按标题 + 区间回查：合并会覆盖 title，同句多事件时还会指错。
+        const created = (merged.draftIds || []).map((id) =>
+          id ? graph.nodes.find((n) => n.id === id) ?? { id } : null,
         );
         const edgeDrafts = [];
         for (const [i, relation] of (value.relations || []).entries()) {
@@ -449,9 +449,17 @@ export async function extractStoryEvents(
 
 function splitSources(text, size = 600) {
   const sources = [];
+  // offset 是分片在 part 内的起点，只供程序定位使用；
+  // 发给模型的载荷仍是 { sourceId, text }，结构不变。
+  let cursor = 0;
   for (const line of text.match(/[^\n]+\n?|\n/g) || []) {
     for (let start = 0; start < line.length; start += size)
-      sources.push({ sourceId: sources.length + 1, text: line.slice(start, start + size) });
+      sources.push({
+        sourceId: sources.length + 1,
+        text: line.slice(start, start + size),
+        offset: cursor + start,
+      });
+    cursor += line.length;
   }
   return sources;
 }
@@ -594,21 +602,27 @@ export function checkStoryEvents(project, graph, { knowledgeClaims = [] } = {}) 
     const oldCount = countText(before);
     const newCount = countText(after);
     if (!oldCount || !newCount || oldCount === newCount) return false;
-    // ① 后一条自身陈述的是"变化后的结果量"（剩/余…）——它承接了动作；
-    //    或 ② 后一条自身含动作词。
-    // 两者都不满足时（如"老周说九个"这种并存断言），即便上下文出现过动作词，
-    // 也不能算解释了数量差——那是同刻两个互斥陈述，必须进待核对项。
-    if (statesResult(own) || PROCESS_ACTION.test(own)) return true;
-    // 后一条只是静态陈述，但上下文确实写了动作且它紧接旧量之后：
-    // 仍要求后一条带结果态语义，否则不豁免。
-    return statesResult(context) && PROCESS_ACTION.test(context) && statesResult(own);
+    // 自身写明真实过程动作（吃/喝/用/送/交…）才算解释了数量差。
+    // 「剩」「余」「还留」只是结果态：它描述"现在是多少"，
+    // 单独出现不构成变化过程，不得据此豁免互斥（G6/H5）。
+    if (PROCESS_ACTION.test(own)) return true;
+    // 后一条只写结果量时，仍要求上下文里确有真实过程动作把它承接过去；
+    // 只有"剩/余"而没有过程（"还剩十个"→"只剩九个"）是并存矛盾，不豁免。
+    return statesResult(own) && PROCESS_ACTION.test(context);
   };
   // 同一时点：同章即视为可能并存；跨章按时间推进处理，不判互斥。
-  // 两条都写了相同 storyTime（如"同一时刻"）时，更是明确的"同时并存"，
-  // 此时即便出现过程动词也不能当作推进——这是对明确故事时间的尊重。
+  // 但"相同字符串"不等于同一瞬间：模型常把未知或宽泛时段统一写成
+  // 「未知」「午饭时」，这类取值不提供并存线索，不能据此禁止过程豁免（H4）。
+  const UNKNOWN_TIME = /^(未知|不详|不明|不确定|待定|未提及)$/;
+  const SIMULTANEOUS_TIME = /(同一时刻|同时|与此同时|同一瞬间|此刻同时)/;
   const sameTimePoint = (a, b) => a.chapterId === b.chapterId;
-  const explicitSameTime = (a, b) =>
-    Boolean(a.storyTime) && a.storyTime === b.storyTime;
+  const explicitSameTime = (a, b) => {
+    if (!a.storyTime || a.storyTime !== b.storyTime) return false;
+    if (UNKNOWN_TIME.test(a.storyTime.trim())) return false;
+    // 明确的并存线索（同一时刻/同时…）才构成"同刻互斥"；
+    // 其余相同的时段名（如「午饭时」）只是粗粒度范围，仍需过程豁免。
+    return SIMULTANEOUS_TIME.test(a.storyTime);
+  };
   for (const [object, nodes] of byObject) {
     const conflicts = [];
     for (let i = 0; i < nodes.length; i += 1) {

@@ -119,6 +119,9 @@
 
 ## 故事事件链第一阶段第三轮返修（2026-11-08）
 
+> **本节为当轮自述，已被第四轮推翻部分结论，不可作为当前证据。**
+> 本节记载的 `status: passed` / 28 案例全通过，其等待判据依赖 Playwright `page.waitForFunction(async 谓词)`，该写法会把返回的 Promise 当作 truthy、0 秒即判真（第四轮实测：async 谓词返回 false 时 `settled=true, 39ms`；sync 谓词返回 false 时 `settled=false, 3007ms`）。因此当时的「通过」不可采信，需以第四轮改用可靠轮询后的复核结果为准（见文末「历史诊断更正」与「端到端验收：incomplete，不是 passed」）。
+
 ### 需求来源
 
 `agent-design/story-event-chain-review-fix-stage-1-round3.md` 列出 G1–G7 七项经独立 review 确认的缺陷。第二轮虽已交付 F1–F11 并通过 412 项测试与 28 个端到端案例，但那些结果没有覆盖本轮缺陷：过滤无效事件后关系编号错移、同句往返交接被合并、重复引文丢弃正确区间、建图后画布与共享 revision 未刷新、「重新建立」空跑、把「剩」当变化过程漏报同时点矛盾、验收脚本允许失败通过。
@@ -164,3 +167,66 @@
 4. 「放弃候选」无独立 IPC，走 UI 改 status 后 save 的既有路径——这是现状，不是本轮新增设计。
 5. G2 的方向判据依赖 `actors` 顺序；真实模型若对 actors 排序不稳定，往返交接可能仍被合并，未做真实模型抽样。
 6. G6 向前扩两句取动作词，若正文分段极碎可能取不到，未做长文本抽样。
+
+## 故事事件链第一阶段第四轮返修（2026-11-08）
+
+> 本节为此前各节之后的追加记录。以上历史章节是当轮自述，**不等于本轮证据**；本轮结论以下面列出的实测命令输出与报告路径为准。
+
+### 需求来源
+
+`agent-design/story-event-chain-review-fix-stage-1-round4.md` 列出 H1–H7 七项经独立 review 确认的必修问题。第三轮虽已交付 G1–G7 并通过 412 项测试与 28 个端到端案例，但那些结果没有覆盖本轮缺陷：同句往返交接仍丢失身份、验收脚本顶层异常被吞掉反而返回成功、合法 `sourceId` 指向的重复引文被误拒、相同「未知」或宽泛时段被判为同一瞬间、「剩」可单独豁免数量矛盾、无待补章节时仍写入新 revision、两条产品链路仍用替代操作通过。
+
+### 本轮修改文件
+
+运行时：`runtime/story-events.mjs`、`runtime/story-event-agent.mjs`、`runtime/chapter-agent.mjs`、`runtime/structured-step.mjs`。
+主进程：`electron/story-build-channel.mjs`、`electron/main.mjs`。
+前端：`src/features/StoryEvents.tsx`、`src/features/useStoryEvents.ts`、`src/lib/types.ts`。
+验收脚本：`scripts/verify-story-events.cjs`、`scripts/verify-story-events.assert.cjs`、`scripts/verify-story-events.model-stub.mjs`。
+测试：`tests/story-events.test.mjs`、`tests/story-event-workflow.test.mjs`、`tests/story-build-channel.test.mjs`，新增 `tests/chapter-retrieval-stall.test.mjs`、`tests/structured-call-stall.test.mjs`。
+
+### 实现要点
+
+- **H1｜事件身份最小匹配**：`runtime/story-events.mjs` 的 `matchScore`/`sameEvent`/`setKey`/`duplicateDraft` 重写；合并时先把历史节点快照进 `historyNodes`，并返回与输入草稿一一对应的 `draftIds`（被拒为 `null`），`runtime/story-event-agent.mjs` 的关系端点改用 `draftIds` 映射，不再按 title+区间回查。区间重叠是跨批次匹配的硬条件；`actors`/`objects` 按集合（`setKey` 去重排序）比较，**取消**原先依赖 `actors` 顺序承载方向、以及依赖「还给/交还/归还」等方向词表的判据；同一批次内只有标题、区间、actors、objects **全等**才算重复草稿；同文本不同区间（如「甲敲门」两次）各自成节点。
+- **H2｜顶层异常不再被吞**：`scripts/verify-story-events.cjs` 的 `finally` 由 `process.exit(process.exitCode ?? 0)` 改为 `process.exitCode = code`，让外层 `catch` 先跑完并把原因写盘；新增每次运行唯一的 `RUN_ID`；新增 `NOVEL_E2E_INJECT_LAUNCH_FAILURE=1`（首次 Electron launch 抛出）与 `NOVEL_E2E_INJECT_FAILURE=<caseId>`（指定案例强制断言失败）两个注入入口；失败报告写入 `runs/<runId>/`，不会误读上一次成功报告。
+- **H3｜`sourceId` 作用域定位**：`runtime/story-event-agent.mjs` 的 `locateUnique` 改为返回 `{ located, reason }`；`splitSources` 为每个分片带上 `offset`；存在合法 `sourceId` 时只在该 source 对应的 offset 范围内定位与核验；显式 span 逐字核验通过则保留 span；「未找到」与「多处匹配」分开报因，不再互相矛盾地同时输出「引文不在原文中」与「歧义」。
+- **H4｜同一时点判据**：新增 `UNKNOWN_TIME`（未知/不详/不明/不确定/待定/未提及）与 `SIMULTANEOUS_TIME`（同一时刻/同时/与此同时/同一瞬间/此刻同时）两个判据；任意非空相同时间字符串**不再**等于同时点，未知类与宽泛时段（如「午饭时」）不构成同时点；只有原文明确写明并存线索才按同时点处理并形成待核对项。
+- **H5｜结果态不豁免**：移除 `statesResult(own)` 的单独豁免，豁免必须由 `PROCESS_ACTION`（真实过程动作）提供。仅「剩九个」的结果态不再能掩盖同刻数量矛盾。
+- **H6｜空补全不写版本**：`electron/story-build-channel.mjs` 新增 `planStoryBuild`（纯函数，算出待补目标章）与 `runStoryBuild`（空目标直接返回 `skipped: true, skippedReason: "no-targets"`，不调模型、不写作品、不动 revision）；`src/features/useStoryEvents.ts` 的 `primaryBuildMode` 增加 `"none"`；`src/features/StoryEvents.tsx` 无待补时不渲染可执行按钮；`electron/main.mjs` 改走 `runStoryBuild`；`src/lib/types.ts` 补上可选字段。
+- **H7｜两条链路改真实操作**：`scripts/verify-story-events.cjs` 大幅改造——用真实按钮而非直调 `window.studio.storyBuild`、同一会话校验当前画布与共享 revision、候选绑定本次生成的候选 ID、预览断言具体端点/问题/证据内容、**移除**手写 `pending-abandon-e2e` 与手写 `pending-chain2-revise`、新增 `pollUntil` 与 `waitOrchestrationIdle` 替代固定延时；`scripts/verify-story-events.assert.cjs` 新增 `unverified` 语义（前置缺失时显式标未验证，不被兜底改写成 pass 或 fail）；`scripts/verify-story-events.model-stub.mjs` 增加跨章边与问题产出。
+- **附带健壮性修复（非 H 项，独立标注）**：`runtime/chapter-agent.mjs` 新增 `RETRIEVAL_WAIT_MS = 120000` 包住 `retrieval.sync`/`.search`，到限抛 `RETRIEVAL_TIMEOUT`；`runtime/structured-step.mjs` 新增 `MODEL_CALL_DEADLINE_MS = 30 * 60 * 1000` 由 `callWithDeadline()` 包住整个模型调用。两者只能由测试缩短、不能关闭。这两项是为了消除「无上限等待、失败后无 error」的可证实缺口，**不是**对现场卡死根因的修复（见下）。
+
+### 实际命令与结果
+
+- `node --test tests/*.test.mjs` → `tests 438 / pass 438 / fail 0 / cancelled 0 / skipped 0`，基线 412 → 438（新增两个超时保护测试文件）。
+- `./node_modules/.bin/tsc --noEmit` → exit 0。
+- `git diff --check` → exit 0。
+- 正式作品 `project.json` SHA-256 → `5c8687820d1d819d6b5cf5a994ab8d4024ea4688b52f19af2467b706f6fc4ec0`，与 review 基线一致，未被触碰。
+- `npm run pack` → exit 0，产物 `release/NovelAgentStudio-darwin-arm64/NovelAgentStudio.app`。
+
+### 端到端验收：**incomplete，不是 passed**
+
+`node scripts/verify-story-events.cjs` 最终报告（`verification/story-event-chain/round4/e2e/runs/2026-11-08T06-29-16-636Z-42321-6b2592/report.json`）：
+
+- `status: "incomplete"`，`caseSummary: { total: 28, pass: 25, fail: 0, unverified: 3, unresolved: 0 }`。
+- `pageErrors: []`，`fixtureEvidenceAudit: { ok: true, checked: 5, failures: [] }`，`restartVerified: true`，`versionMismatch: null`，11 张截图。
+- 3 项未验证：`chain1-accept`、`chain2-revise`、`chain2-accept-restart`。
+
+**未验证原因（准确表述）**：`src/features/ChapterGeneration.tsx:39` 用 `!!pending` 禁用生成按钮；同文件 `:19-21` 只在该章正文存在差异时渲染「采纳/放弃」入口，导致「无改动候选」在章节页没有任何处理途径。两者叠加形成死锁，阻断上述 3 项链路验证。脚本按设计拒绝用 IPC 直接 save 或手写候选绕过，因此如实标注 `unverified` 而非判 pass。
+
+### 历史诊断更正（重要）
+
+本文件此前若干轮曾把「任务卡在记忆整理 / 检索索引」当作产品根因。**该归因未坐实，已降级**：部分「卡死快照」实际源于 Playwright `page.waitForFunction(async 谓词)` 把返回的 Promise 当作 truthy、**0 秒即判真**。首辅独立实测（脚本 `verification/story-event-chain/round4/lead/verify-wff.mjs`）：async 谓词返回 false 时 `settled=true, 39ms`；sync 谓词返回 false 时 `settled=false, 3007ms`。改用可靠轮询后，同一条 `chain1-generate` 链路在 2 秒内真实完成并产出候选。
+
+因此：本轮的两处超时保护属**可证实的健壮性缺口**（`runtime/providers.mjs` 的 `fetcher` 与 `runtime/provider-stream.mjs` 的 `reader.read()` 均无上限等待，一旦不返回任务将永久停在 `requesting` 且无 error），加上是合理的；但**不得**据此声称「已修复卡死根因」。底层 embedding 偶发不返回的机制与供应商无响应的成因均未验证。
+
+### 仍未验证
+
+1. 全部模型响应来自 `NOVEL_E2E_MODEL_STUB` 替身，证明的是「请求携带历史事件 id 与原文」「候选预览含跨章边/问题/证据」，**不**证明真实 GLM/MiniMax 理解并使用；本轮未调用任何真实供应商。
+2. 上条所述 3 项端到端案例未验证，整体状态为 `incomplete`，第一阶段**未**通过验收。
+3. 打包产物下的界面版本已实测与 `build-info.json` 一致（见下方交付版本），但「关于」窗口本轮未定位到可点击入口，`aboutPanelVerified: false`，仅侧栏与标题实测比对。
+4. 底层 embedding / 供应商无响应成因未验证；30 分钟模型调用上限是工程判断值（24000 输出上限 ÷ 约 20 tok/s ≈ 20 分钟，留 50% 余量），非供应商 SLA 推导，真实长思考场景是否够用未验证。
+5. 正式十章作品未建图（刻意只读保护），本轮前后哈希一致。
+
+### 交付版本
+
+`0.1.178+20261108.144107.762.9b9876ababae`（北京时间 2026-11-08 14:41:07）。`package.json`、`build-info.json`、`Info.plist` 的 `CFBundleShortVersionString`、`app.asar` 内 `build-info.json` 与 `package.json` 五处一致；打包产物界面左下方显示的完整版本串与之逐字一致。版本号由 `prebuild` 钩子自动递增生成，未手工写死。证据：`verification/story-event-chain/round4/delivery/`。
