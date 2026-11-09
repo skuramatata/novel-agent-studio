@@ -504,6 +504,63 @@ function issueFor(kind, explanation, { nodeIds = [], edgeIds = [], suggestion = 
 
 // 增量合并：先按章节与出处匹配已有事件复用 id，再补新事件与新关系。
 // 已有图必须带着章节表归一化，否则合法 explicit 边会因为"无正文可核"被丢弃。
+// 草稿预处理：章节缺失与引文不可核在进入身份裁定前就拒绝，
+// 让后续归属只面对合法草稿，序号映射仍与输入一一对应（拒绝为 reject）。
+function prepareDraft(raw, chapterById, chapters) {
+  const source = chapterById.get(raw.chapterId);
+  if (!source)
+    return {
+      reject: issueFor("missing-source", `事件所属章节 ${raw.chapterId} 不在当前作品中。`, {
+        suggestion: "确认章节 id 后重新提交。",
+      }),
+    };
+  const evidence = normalizeEvidence(raw.evidence, chapters, raw.chapterId);
+  if (!evidence)
+    return {
+      reject: issueFor(
+        "missing-source",
+        `事件「${raw.title}」的引文不在第 ${source.number} 章当前正文中。`,
+        { suggestion: "改用当前正文中的逐字引文与正确区间。" },
+      ),
+    };
+  return { source, draft: { ...nodeDraft(raw), evidence } };
+}
+
+// 历史身份的唯一归属：候选对按得分从高到低裁定，一对身份只能归属一条草稿。
+// 同分时用草稿自身签名打破平局（不依赖输入顺序），保证逆序提交结果一致。
+// 未获归属的草稿一律新建：绝不与别人共享历史 id，也不会覆盖他人标题与证据。
+function assignHistoryNodes(prepared, historyNodes) {
+  // 同批等价草稿先按 duplicateDraft 判据归并：一组重复里只有最先出现的一条
+  // 参与历史身份裁定，其余留到落点循环按 twin 复用同一节点。
+  // 否则两份相同的 A 会分别抢走历史 A、B 两个身份，把 B 改写成第二份 A。
+  const owners = [];
+  for (const [index, entry] of prepared.entries()) {
+    if (entry.reject) continue;
+    if (owners.some((owner) => duplicateDraft(owner.draft, entry.draft))) continue;
+    owners.push({ index, draft: entry.draft });
+  }
+  const pairs = [];
+  for (const { index } of owners) {
+    const entry = prepared[index];
+    for (const node of historyNodes) {
+      const score = matchScore(node, entry.draft);
+      if (!sameEvent(node, entry.draft, score)) continue;
+      pairs.push({ index, nodeId: node.id, score, tie: draftSignature(entry.draft) });
+    }
+  }
+  pairs.sort(
+    (a, b) => b.score - a.score || (a.tie < b.tie ? -1 : a.tie > b.tie ? 1 : a.index - b.index),
+  );
+  const ownerByIndex = new Map();
+  const usedNodeIds = new Set();
+  for (const pair of pairs) {
+    if (ownerByIndex.has(pair.index) || usedNodeIds.has(pair.nodeId)) continue;
+    ownerByIndex.set(pair.index, pair.nodeId);
+    usedNodeIds.add(pair.nodeId);
+  }
+  return ownerByIndex;
+}
+
 export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
   const chapters = options.chapters || (options.chapter ? [options.chapter] : []);
   // 候选增量可引用正式历史端点：调用方声明已知节点后，本轮 edges 的端点
@@ -520,53 +577,50 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
   const nodes = current.nodes.map((n) => ({ ...n }));
   // 跨批次匹配只能命中合并前已存在的节点：本批新建的节点不参与匹配，
   // 否则同批两条不同草稿会被后一条"重抽"进前一条，丢掉其中一个身份。
-  const historyNodes = [...nodes];
+  // 匹配依据必须是合并前的快照，不能与后续原地写入共享引用：
+  // 命中后会把 title/actors/evidence 等原地 Object.assign 进历史节点，
+  // 共享引用会让下一条草稿按被改写过的内容重新判等，误判成同一事件。
+  const historyNodes = current.nodes.map((n) => ({
+    ...n,
+    actors: [...n.actors],
+    objects: [...n.objects],
+    evidence: { ...n.evidence },
+  }));
+  // 本批已被占用的历史身份：一个历史节点在一批草稿里只能承接一条草稿。
+  // 两条已被判为不同的事件不得借同一历史 id 互相覆盖——这正是
+  // "同一件事只保留一个身份"的反面。真正重复的草稿仍走同批 duplicateDraft 复用。
+  const prepared = nodeDrafts.map((raw) => prepareDraft(raw, chapterById, chapters));
+  // 历史身份的唯一归属：先对全部草稿做一次快照匹配，再按证据强度全局裁定。
+  // 若按遍历顺序"先到先得"，数组顺序就成了身份——同一批逆序提交时，
+  // 先出现的那条会抢走历史 id，另一条被迫改名（甚至撞 id 退避），关系随之换指。
+  const historyOwner = assignHistoryNodes(prepared, historyNodes);
   const issues = [...current.issues];
   const counts = { added: 0, merged: 0, updated: 0, stale: 0 };
   // 与输入 drafts 一一对应的落点：被拒为 null，新建/复用为节点 id。
   const draftIds = [];
   // 本批已落点的节点 id：同批重复判定只在这些节点里找，不碰历史节点。
   const batchNodeIds = [];
-  for (const raw of nodeDrafts) {
-    const source = chapterById.get(raw.chapterId);
-    if (!source) {
+  for (const [index, entry] of prepared.entries()) {
+    if (entry.reject) {
       draftIds.push(null);
-      issues.push(
-        issueFor("missing-source", `事件所属章节 ${raw.chapterId} 不在当前作品中。`, {
-          suggestion: "确认章节 id 后重新提交。",
-        }),
-      );
+      issues.push(entry.reject);
       continue;
     }
-    const evidence = normalizeEvidence(raw.evidence, chapters, raw.chapterId);
-    if (!evidence) {
-      draftIds.push(null);
-      issues.push(
-        issueFor(
-          "missing-source",
-          `事件「${raw.title}」的引文不在第 ${source.number} 章当前正文中。`,
-          { suggestion: "改用当前正文中的逐字引文与正确区间。" },
-        ),
-      );
-      continue;
-    }
-    const draft = { ...nodeDraft(raw), evidence };
-    let best = null;
-    let bestScore = 0;
-    for (const node of historyNodes) {
-      const score = matchScore(node, draft);
-      if (score > bestScore && sameEvent(node, draft, score)) {
-        best = node;
-        bestScore = score;
-      }
-    }
+    const { source, draft } = entry;
+    const historyId = historyOwner.get(index) ?? null;
+    const best = historyId
+      ? historyNodes.find((n) => n.id === historyId) ?? null
+      : null;
     // 同批重复条目：只有与本批已落点草稿完全同形时才复用该草稿的节点。
     const twin = [...batchNodeIds]
       .reverse()
       .map((id) => nodes.find((n) => n.id === id))
       .find((node) => node && duplicateDraft(node, draft));
     if (best ?? twin) {
-      const target = best ?? twin;
+      const matched = best ?? twin;
+      // best 来自合并前快照，必须回到 nodes 里的真实节点上写入，
+      // 否则更新只落在快照副本上，输出图仍是旧内容。
+      const target = nodes.find((n) => n.id === matched.id) ?? matched;
       Object.assign(target, {
         chapterNumber: source.number,
         chapterTitle: source.title,
@@ -579,7 +633,7 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
         objects: draft.objects,
         status: draft.status,
         basis: draft.basis,
-        evidence,
+        evidence: draft.evidence,
         stale: null,
       });
       counts.merged += 1;
@@ -592,8 +646,8 @@ export function mergeStoryEvents(graph, nodeDrafts = [], options = {}) {
       id: storyEventId({
         chapterId: draft.chapterId,
         title: draft.title,
-        start: evidence.start,
-        end: evidence.end,
+        start: draft.evidence.start,
+        end: draft.evidence.end,
       }),
       chapterNumber: source.number,
       chapterTitle: source.title,

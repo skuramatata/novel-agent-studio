@@ -36,55 +36,6 @@ import {
 
 export const STRUCTURED_RECOVERY_VERSION = `structured-recovery-2:author-ids-1:${REVIEW_RESULT_VERSION}:${REPAIR_PLAN_VERSION}:${WORKFLOW_SKILL.hash}`;
 export const REVIEW_BATCH_PROTOCOL = "complete-chapter-review-2";
-// 供应商请求与 SSE 读取都不带超时；模型长时间无响应时步骤会永久停在 requesting，
-// 检查点里既没有 accepted 也没有 error。这是默认生效的硬保护，不提供关闭开关。
-// 上限依据（工程判断，非供应商 SLA 推导）：单次结构化调用最多产出
-// MAX_STRUCTURED_OUTPUT=24000 tokens（structured.mjs:5），按 ~20 tok/s 估算约 20 分钟，
-// 取 30 分钟留出 50% 余量；常规阶段预算 12000-16000 tokens 余量更充足。
-const MODEL_CALL_DEADLINE_MS = 30 * 60 * 1000;
-async function callWithDeadline(
-  run,
-  { label, step, signal, save, state, deadlineMs, detail },
-) {
-  let timer, onAbort;
-  const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      const error = Object.assign(
-        Error(
-          `${label} 的模型调用等待${Math.round(deadlineMs / 60000) || deadlineMs / 1000}${deadlineMs >= 60000 ? "分钟" : "秒"}仍未返回，已按失败处理；` +
-            `请求或流式读取没有结束，检查点已保留，可直接恢复。`,
-        ),
-        { code: "MODEL_CALL_TIMEOUT" },
-      );
-      reject(error);
-    }, deadlineMs);
-    onAbort = () => reject(signal?.reason ?? Error("任务已停止"));
-    signal?.addEventListener?.("abort", onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([run(), deadline]);
-  } catch (error) {
-    if (error?.code === "MODEL_CALL_TIMEOUT") {
-      step.status = "failed";
-      step.lastFailure = {
-        kind: "timeout",
-        name: "ModelCallTimeout",
-        detail: error.message,
-      };
-      appendCreationEvent(state, {
-        category: stageCategory(label),
-        status: "failed",
-        title: `${label} 模型调用超时`,
-        details: { 原因: error.message, ...(detail ? { 上次失败: detail } : {}) },
-      });
-      await save?.();
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.("abort", onAbort);
-  }
-}
 const authorStages = new Set([
   "review",
   "continuity_review",
@@ -168,11 +119,6 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
   ) {
     signal?.throwIfAborted();
     const contract = options.contract;
-    // 只能缩短、不能关闭：默认硬保护始终生效。
-    const deadlineMs =
-      Number.isFinite(options.callDeadlineMs) && options.callDeadlineMs > 0
-        ? Math.min(options.callDeadlineMs, MODEL_CALL_DEADLINE_MS)
-        : MODEL_CALL_DEADLINE_MS;
     assertWorkflowStage(state, contract);
     if (budget.highReasoning && REVIEW_EFFORTS[contract.id])
       options = {
@@ -377,17 +323,11 @@ export function createStructuredAsker({ state, budget, call, save, signal }) {
         step.outputBudget = tokens;
         await save();
         // 网络中断保留本次纠错输入；不刷新格式纠错预算。
-        // 模型调用是唯一可能永不返回的 await（fetcher / SSE 读取都不带超时）；
-        // 没有上限时步骤会永久停在 requesting 且检查点无 error。
-        const response = await callWithDeadline(
-          () =>
-            call(messages, tokens, label, true, {
-              reasoningEffort: options.reasoningEffort,
-              traceStepId: id,
-              traceOutputKey: key,
-            }),
-          { label, step, signal, save, state, deadlineMs, detail: step.lastFailure?.detail },
-        );
+        const response = await call(messages, tokens, label, true, {
+          reasoningEffort: options.reasoningEffort,
+          traceStepId: id,
+          traceOutputKey: key,
+        });
         observeReasoning(budget, outputScope, response.usage);
         step.calls++;
         const rawKey = `raw:${key}:step-${id.slice(0, 12)}:${step.calls}`;

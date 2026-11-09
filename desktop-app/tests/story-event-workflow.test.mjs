@@ -1975,3 +1975,389 @@ test("H5 自身写出真实过程动作时仍按推进豁免", () => {
       JSON.stringify(checked.issues.map((i) => [i.kind, i.explanation])),
   );
 });
+
+// ---------------------------------------------------------------
+// I1：已有图重建时的历史身份占用 —— 真实抽取 → 合并 → 关系映射。
+// 归属：工部尚书 gongbu-shangshu。
+// ---------------------------------------------------------------
+
+const i1Text = "甲把钥匙交给乙，乙看过后把钥匙递给甲。";
+
+const i1Chapter = { id: "h1", number: 1, title: "往返交接", summary: "", content: i1Text };
+
+const i1Project = (storyEvents) => {
+  const base = project();
+  return { ...base, chapters: [i1Chapter], storyEvents: storyEvents ?? emptyStoryEvents() };
+};
+
+// 两个事件共用整句引文与同一 sourceId，只有标题不同（不得改成两段不重叠引文规避）。
+const i1Event = (title) => ({
+  title,
+  summary: "",
+  kind: "handover",
+  actors: ["甲", "乙"],
+  objects: ["钥匙"],
+  basis: "narration",
+  sourceId: 1,
+  start: 0,
+  end: i1Text.length,
+  quote: i1Text,
+});
+
+// 逐次返回不同 payload 的 ask：模拟第一次只抽出交出、第二次抽出交出+递回。
+const i1Ask = (payloads) => {
+  let call = 0;
+  const ask = async (key, messages, validate) => payloads[Math.min(call++, payloads.length - 1)](validate);
+  ask.calls = () => call;
+  return ask;
+};
+
+test("I1-1 已有图重建：交出事件保留原 ID，递回新建，关系端点各自独立", async () => {
+  const first = await extractStoryEvents(
+    i1Project(),
+    i1Ask([(validate) => validate({ summary: "首次", events: [i1Event("甲把钥匙交给乙")] })]),
+    { chapterIds: ["h1"] },
+  );
+  assert.equal(first.storyEvents.nodes.length, 1, "首次抽取应只落一个节点");
+  const handoverId = first.storyEvents.nodes[0].id;
+  assert.equal(first.storyEvents.nodes[0].title, "甲把钥匙交给乙");
+
+  // 第二次把第一次的图传回同一真实入口。
+  const second = await extractStoryEvents(
+    i1Project(first.storyEvents),
+    i1Ask([
+      (validate) =>
+        validate({
+          summary: "重抽",
+          events: [i1Event("甲把钥匙交给乙"), i1Event("乙把钥匙递给甲")],
+          relations: [
+            {
+              sourceId: 1,
+              targetId: 2,
+              type: "state-transfer",
+              basis: "explicit",
+              explanation: "交出后递回",
+              evidenceSourceId: 1,
+            },
+          ],
+        }),
+    ]),
+    { chapterIds: ["h1"] },
+  );
+
+  const nodes = second.storyEvents.nodes;
+  assert.equal(
+    nodes.length,
+    2,
+    "两个不同事件必须保留为两个节点，实际：" + JSON.stringify(nodes.map((n) => n.title)),
+  );
+  assert.deepEqual(
+    nodes.map((n) => n.title).sort(),
+    ["乙把钥匙递给甲", "甲把钥匙交给乙"].sort(),
+    "两个标题都必须存在，不得只剩递回",
+  );
+  const ids = nodes.map((n) => n.id);
+  assert.equal(new Set(ids).size, 2, "两个事件绝不复用同一历史 ID");
+  assert.ok(ids.includes(handoverId), "交出事件必须保留首次抽取的历史 ID");
+  const handoverNode = nodes.find((n) => n.id === handoverId);
+  assert.equal(handoverNode.title, "甲把钥匙交给乙", "交出节点不得被递回覆盖");
+
+  assert.equal(second.failures.length, 0, "关系不得因端点失效被拒：" + JSON.stringify(second.failures));
+  assert.equal(second.storyEvents.edges.length, 1, "关系必须建立");
+  const edge = second.storyEvents.edges[0];
+  assert.equal(edge.source, handoverId, "关系起点必须是交出事件的历史 ID");
+  assert.notEqual(edge.target, handoverId, "关系终点不得回指交出事件");
+  assert.equal(
+    nodes.find((n) => n.id === edge.target)?.title,
+    "乙把钥匙递给甲",
+    "关系终点必须是递回事件",
+  );
+});
+
+test("I1-2 重复执行相同重建不增生，两节点与关系端点稳定", async () => {
+  const payload = (validate) =>
+    validate({
+      summary: "重抽",
+      events: [i1Event("甲把钥匙交给乙"), i1Event("乙把钥匙递给甲")],
+      relations: [
+        {
+          sourceId: 1,
+          targetId: 2,
+          type: "state-transfer",
+          basis: "explicit",
+          explanation: "交出后递回",
+          evidenceSourceId: 1,
+        },
+      ],
+    });
+
+  // 先只抽出交出事件并保存其 ID（任务书复现输入的第一步）。
+  const first = await extractStoryEvents(
+    i1Project(),
+    i1Ask([(validate) => validate({ summary: "首次", events: [i1Event("甲把钥匙交给乙")] })]),
+    { chapterIds: ["h1"] },
+  );
+  const handoverId = first.storyEvents.nodes[0].id;
+
+  // 同一重建连跑两次：第一次从单节点历史重建，第二次从已含两节点的历史重建。
+  const once = await extractStoryEvents(i1Project(first.storyEvents), i1Ask([payload]), {
+    chapterIds: ["h1"],
+  });
+  const twice = await extractStoryEvents(i1Project(once.storyEvents), i1Ask([payload]), {
+    chapterIds: ["h1"],
+  });
+
+  assert.equal(
+    once.storyEvents.nodes.length,
+    2,
+    "从单节点历史重建必须补齐第二个身份，实际：" +
+      JSON.stringify(once.storyEvents.nodes.map((n) => n.title)),
+  );
+  assert.equal(twice.storyEvents.nodes.length, 2, "重复重建不得增生节点");
+  assert.deepEqual(
+    twice.storyEvents.nodes.map((n) => n.id).sort(),
+    once.storyEvents.nodes.map((n) => n.id).sort(),
+    "重复重建必须复用同一批事件 ID",
+  );
+  assert.ok(
+    twice.storyEvents.nodes.some((n) => n.id === handoverId),
+    "交出事件必须始终保留原历史 ID",
+  );
+  assert.equal(twice.storyEvents.edges.length, 1, "重复重建不得增生关系");
+  assert.equal(twice.storyEvents.edges[0].source, once.storyEvents.edges[0].source);
+  assert.equal(twice.storyEvents.edges[0].target, once.storyEvents.edges[0].target);
+});
+
+test("I1-3 调换输入顺序并同步关系序号：事件 ID 与关系指向都不换", async () => {
+  const forward = (validate) =>
+    validate({
+      summary: "交出在前",
+      events: [i1Event("甲把钥匙交给乙"), i1Event("乙把钥匙递给甲")],
+      relations: [
+        {
+          sourceId: 1,
+          targetId: 2,
+          type: "state-transfer",
+          basis: "explicit",
+          explanation: "交出后递回",
+          evidenceSourceId: 1,
+        },
+      ],
+    });
+  // 顺序颠倒，关系序号同步改成 2→1，语义仍是"交出 → 递回"。
+  const reversed = (validate) =>
+    validate({
+      summary: "递回在前",
+      events: [i1Event("乙把钥匙递给甲"), i1Event("甲把钥匙交给乙")],
+      relations: [
+        {
+          sourceId: 2,
+          targetId: 1,
+          type: "state-transfer",
+          basis: "explicit",
+          explanation: "交出后递回",
+          evidenceSourceId: 1,
+        },
+      ],
+    });
+
+  const a = await extractStoryEvents(i1Project(), i1Ask([forward]), { chapterIds: ["h1"] });
+  const b = await extractStoryEvents(i1Project(), i1Ask([reversed]), { chapterIds: ["h1"] });
+
+  // 顺序无关性必须在"已有单节点历史"这条真实重建路径上验证：
+  // 数组顺序不得被当成永久身份，否则先出现的那条会抢走历史 id。
+  const idOf = (result, title) => result.storyEvents.nodes.find((n) => n.title === title)?.id;
+  assert.equal(
+    idOf(a, "甲把钥匙交给乙"),
+    idOf(b, "甲把钥匙交给乙"),
+    "交出事件的 ID 不得随数组顺序改变",
+  );
+  assert.equal(
+    idOf(a, "乙把钥匙递给甲"),
+    idOf(b, "乙把钥匙递给甲"),
+    "递回事件的 ID 不得随数组顺序改变",
+  );
+  assert.equal(a.storyEvents.edges[0].source, b.storyEvents.edges[0].source, "关系起点不得换指");
+  assert.equal(a.storyEvents.edges[0].target, b.storyEvents.edges[0].target, "关系终点不得换指");
+
+  const history = await extractStoryEvents(
+    i1Project(),
+    i1Ask([(validate) => validate({ summary: "首次", events: [i1Event("甲把钥匙交给乙")] })]),
+    { chapterIds: ["h1"] },
+  );
+  const handoverId = history.storyEvents.nodes[0].id;
+  const rebuilt = await extractStoryEvents(i1Project(history.storyEvents), i1Ask([reversed]), {
+    chapterIds: ["h1"],
+  });
+  assert.equal(rebuilt.storyEvents.nodes.length, 2, "颠倒顺序重建同样必须补齐两个身份");
+  assert.equal(
+    idOf(rebuilt, "甲把钥匙交给乙"),
+    handoverId,
+    "历史 ID 必须跟随事件语义，不能跟随它在数组里的位置",
+  );
+  assert.equal(rebuilt.storyEvents.edges[0].source, handoverId, "关系起点仍必须是交出事件");
+  assert.equal(
+    rebuilt.storyEvents.nodes.find((n) => n.id === rebuilt.storyEvents.edges[0].target)?.title,
+    "乙把钥匙递给甲",
+    "关系终点仍必须是递回事件",
+  );
+});
+
+// I1-4：同批重复草稿不得占用另一事件的历史身份。
+// 第二次重抽只返回两份等价的 A 草稿、不新增关系，递回事件必须原样保留。
+test("I1-4 重抽只返回重复稿时，递回保留原 ID，旧边端点不被换指", async () => {
+  const first = await extractStoryEvents(
+    i1Project(),
+    i1Ask([
+      (validate) =>
+        validate({
+          summary: "首次",
+          events: [i1Event("甲把钥匙交给乙"), i1Event("乙把钥匙递给甲")],
+          relations: [
+            {
+              sourceId: 1,
+              targetId: 2,
+              type: "state-transfer",
+              basis: "explicit",
+              explanation: "交出后递回",
+              evidenceSourceId: 1,
+            },
+          ],
+        }),
+    ]),
+    { chapterIds: ["h1"] },
+  );
+  assert.equal(first.failures.length, 0, "首次抽取不得失败：" + JSON.stringify(first.failures));
+  assert.equal(first.storyEvents.nodes.length, 2, "首次抽取应落两个节点");
+  const idOf = (result, title) => result.storyEvents.nodes.find((n) => n.title === title)?.id;
+  const handoverId = idOf(first, "甲把钥匙交给乙");
+  const returnId = idOf(first, "乙把钥匙递给甲");
+  assert.ok(handoverId && returnId && handoverId !== returnId, "两个事件必须是不同身份");
+
+  const again = await extractStoryEvents(
+    i1Project(first.storyEvents),
+    i1Ask([
+      (validate) =>
+        validate({
+          summary: "重抽重复",
+          events: [i1Event("甲把钥匙交给乙"), i1Event("甲把钥匙交给乙")],
+        }),
+    ]),
+    { chapterIds: ["h1"] },
+  );
+
+  const nodes = again.storyEvents.nodes;
+  assert.equal(
+    nodes.length,
+    2,
+    "重复草稿不得增生节点，实际：" + JSON.stringify(nodes.map((n) => [n.id, n.title])),
+  );
+  assert.equal(
+    nodes.find((n) => n.id === returnId)?.title,
+    "乙把钥匙递给甲",
+    "递回事件不得被重复的 A 草稿改写",
+  );
+  assert.equal(
+    nodes.find((n) => n.id === handoverId)?.title,
+    "甲把钥匙交给乙",
+    "交出事件必须保留原 ID 与语义",
+  );
+  assert.deepEqual(
+    nodes.map((n) => n.id).sort(),
+    [handoverId, returnId].sort(),
+    "重抽不得新增或替换既有事件身份",
+  );
+  assert.equal(again.failures.length, 0, "重抽不得产生失败：" + JSON.stringify(again.failures));
+  assert.equal(again.storyEvents.edges.length, 1, "旧边必须保留且不增生");
+  assert.equal(again.storyEvents.edges[0].source, handoverId, "旧边起点不得换指");
+  assert.equal(again.storyEvents.edges[0].target, returnId, "旧边终点不得换指");
+  assert.equal(
+    again.storyEvents.issues.length,
+    0,
+    "重抽不得新增问题：" + JSON.stringify(again.storyEvents.issues),
+  );
+});
+
+// I1-5：重复项夹在中间时，关系引用的原始草稿序号不能被去重压缩。
+// 草稿顺序 A、A、C，关系 2 → 3；重复的 A 不得占走历史 B 的身份，
+// 端点必须真实落在交出事件与新建事件上。
+test("I1-5 含重复草稿时，关系引用原始序号必须指向真实事件", async () => {
+  const first = await extractStoryEvents(
+    i1Project(),
+    i1Ask([
+      (validate) =>
+        validate({
+          summary: "首次",
+          events: [i1Event("甲把钥匙交给乙"), i1Event("乙把钥匙递给甲")],
+          relations: [
+            {
+              sourceId: 1,
+              targetId: 2,
+              type: "state-transfer",
+              basis: "explicit",
+              explanation: "交出后递回",
+              evidenceSourceId: 1,
+            },
+          ],
+        }),
+    ]),
+    { chapterIds: ["h1"] },
+  );
+  const idOf = (result, title) => result.storyEvents.nodes.find((n) => n.title === title)?.id;
+  const handoverId = idOf(first, "甲把钥匙交给乙");
+  const returnId = idOf(first, "乙把钥匙递给甲");
+  assert.ok(handoverId && returnId, "首次抽取必须落两个事件");
+
+  const outsider = { start: 0, end: 2, quote: "甲把" };
+  const again = await extractStoryEvents(
+    i1Project(first.storyEvents),
+    i1Ask([
+      (validate) =>
+        validate({
+          summary: "含重复项重抽",
+          events: [
+            i1Event("甲把钥匙交给乙"),
+            i1Event("甲把钥匙交给乙"),
+            {
+              title: "甲把钥匙收起",
+              summary: "",
+              kind: "action",
+              actors: ["甲"],
+              objects: ["钥匙"],
+              basis: "narration",
+              sourceId: 1,
+              start: outsider.start,
+              end: outsider.end,
+              quote: outsider.quote,
+            },
+          ],
+          relations: [
+            {
+              sourceId: 2,
+              targetId: 3,
+              type: "state-transfer",
+              basis: "explicit",
+              explanation: "交出后又收起",
+              evidenceSourceId: 1,
+            },
+          ],
+        }),
+    ]),
+    { chapterIds: ["h1"] },
+  );
+
+  const nodes = again.storyEvents.nodes;
+  assert.equal(again.failures.length, 0, "关系不得因端点失效被拒：" + JSON.stringify(again.failures));
+  assert.equal(
+    nodes.find((n) => n.id === returnId)?.title,
+    "乙把钥匙递给甲",
+    "重复的 A 草稿不得占走递回事件的历史身份",
+  );
+  const createdId = again.storyEvents.nodes.find((n) => n.title === "甲把钥匙收起")?.id;
+  assert.ok(createdId, "第三个事件必须新建并保留语义");
+  assert.equal(nodes.length, 3, "两个历史事件加一个新事件，不得多出重复节点");
+  const edge = again.storyEvents.edges.find((e) => e.explanation === "交出后又收起");
+  assert.ok(edge, "引用原始序号 2 → 3 的关系必须建立");
+  assert.equal(edge.source, handoverId, "关系起点必须对应原始序号 2 的交出事件");
+  assert.equal(edge.target, createdId, "关系终点必须对应原始序号 3 的新事件");
+});

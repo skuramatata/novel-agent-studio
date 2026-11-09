@@ -2066,6 +2066,92 @@ test("H1-B 同一事件重抽：actors 列举顺序变化仍复用同一事件 I
   assert.equal(again.draftIds[0], first.nodes[0].id, "draftIds 必须指回复用的事件 id");
 });
 
+test("H1-D 同批重复草稿先去重再分配历史身份：递回不被改写，draftIds 一一对应", () => {
+  const text = "甲把钥匙交给乙，乙看过后把钥匙递给甲。";
+  const ch = h1Chapter("ch-h1d", text);
+  const whole = { start: 0, end: text.length, quote: text };
+  const handover = (patch = {}) =>
+    h1Draft({
+      chapterId: "ch-h1d",
+      title: "甲把钥匙交给乙",
+      evidence: { ...whole },
+      ...patch,
+    });
+  const returnDraft = h1Draft({
+    chapterId: "ch-h1d",
+    title: "乙把钥匙递给甲",
+    evidence: { ...whole },
+  });
+  const first = mergeStoryEvents(
+    emptyStoryEvents(),
+    [handover(), returnDraft],
+    {
+      chapters: [ch],
+      edges: [
+        {
+          source: storyEventId({
+            chapterId: "ch-h1d",
+            title: "甲把钥匙交给乙",
+            start: 0,
+            end: text.length,
+          }),
+          target: storyEventId({
+            chapterId: "ch-h1d",
+            title: "乙把钥匙递给甲",
+            start: 0,
+            end: text.length,
+          }),
+          type: "state-transfer",
+          basis: "explicit",
+          explanation: "交出后递回",
+          evidence: [{ chapterId: "ch-h1d", ...whole }],
+        },
+      ],
+    },
+  );
+  const [handoverId, returnId] = first.draftIds;
+  assert.notEqual(handoverId, returnId, "历史 A、B 必须是两个身份");
+  assert.equal(first.storyEvents.edges.length, 1, "初始关系必须建立");
+
+  // 重抽只给出两份等价的 A 草稿，外加一条引文不在正文中的被拒草稿。
+  const again = mergeStoryEvents(
+    first.storyEvents,
+    [
+      handover(),
+      handover(),
+      h1Draft({
+        chapterId: "ch-h1d",
+        title: "不在原文中的事件",
+        evidence: { start: 0, end: 2, quote: "乙把" },
+      }),
+    ],
+    { chapters: [ch] },
+  );
+  const nodes = again.storyEvents.nodes;
+  assert.equal(
+    nodes.length,
+    2,
+    "重复草稿不得增生节点，实际：" + JSON.stringify(nodes.map((n) => n.title)),
+  );
+  assert.deepEqual(
+    nodes.map((n) => n.title).sort(),
+    ["乙把钥匙递给甲", "甲把钥匙交给乙"].sort(),
+    "重复的 A 草稿不得占用递回事件的身份",
+  );
+  assert.equal(
+    nodes.find((n) => n.id === returnId)?.title,
+    "乙把钥匙递给甲",
+    "递回事件不得被重复草稿改写",
+  );
+  assert.equal(again.draftIds.length, 3, "draftIds 必须与输入草稿一一对应");
+  assert.equal(again.draftIds[0], handoverId, "第一条重复草稿复用交出事件 id");
+  assert.equal(again.draftIds[1], handoverId, "重复项必须映射到同一事件 id");
+  assert.equal(again.draftIds[2], null, "被拒草稿必须占位为 null");
+  const edge = again.storyEvents.edges[0];
+  assert.equal(edge.source, handoverId, "关系起点仍必须是交出事件");
+  assert.equal(edge.target, returnId, "关系终点仍必须是递回事件");
+});
+
 test("H1-C 同位置文本重复出现时，两次敲门必须保留为两个节点", () => {
   const text = "甲敲门。乙开窗。甲敲门。";
   const ch = h1Chapter("ch-h1c", text);
